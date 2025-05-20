@@ -1,4 +1,4 @@
-/*'use client';
+'use client';
 
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
@@ -139,13 +139,4 @@ export default function Home() {
       </div>
     </main>
   );
-}
-*/
-
-'use client';
-
-export const dynamic = "force-dynamic";
-
-export default function Home() {
-  return <h1>✅ Dynamic homepage loaded</h1>;
 }
