@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import { CandlestickData, MarketStatus, PlotData, PlotLayout } from '@/app/types';
+import { CandlestickData, MarketStatus, PlotData, PlotLayout, LastPrice } from '@/app/types';
 
 // Dynamically import Plotly to avoid SSR issues
 const Plot = dynamic(() => import('react-plotly.js'), { 
@@ -16,6 +16,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 export default function Home() {
   const [symbol, setSymbol] = useState('AAPL');
   const [data, setData] = useState<CandlestickData | null>(null);
+  const [lastPrice, setLastPrice] = useState<LastPrice | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null);
@@ -52,15 +53,42 @@ export default function Home() {
     }
   };
 
+  const fetchLastPrice = async () => {
+    try {
+      console.log('Fetching last price for:', symbol);
+      const response = await fetch(`${API_URL}/api/stock/${symbol}/last-price`);
+      console.log('Last price response status:', response.status);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        console.error('Last price error:', errorData);
+        throw new Error(errorData?.detail || `HTTP error! status: ${response.status}`);
+      }
+      const result = await response.json();
+      console.log('Last price result:', result);
+      setLastPrice(result);
+    } catch (err) {
+      console.error('Error fetching last price:', err);
+      // Don't set error state here to avoid disrupting the UI
+    }
+  };
+
   useEffect(() => {
     console.log('Component mounted, fetching initial data...');
     fetchMarketStatus();
     fetchData();
   }, []); // Only fetch on mount
 
-  const handleSymbolSubmit = (e: React.FormEvent) => {
+  const handleSymbolSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    fetchData();
+    setLoading(true);
+    setError(null);
+    try {
+      await Promise.all([fetchData(), fetchLastPrice()]);
+    } catch (err) {
+      console.error('Error in handleSymbolSubmit:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const plotData: PlotData = data ? [{
@@ -93,6 +121,29 @@ export default function Home() {
           {marketStatus && (
             <div className={`mb-4 p-2 rounded ${marketStatus.is_open ? 'bg-green-900/50' : 'bg-red-900/50'}`}>
               Market is currently {marketStatus.is_open ? 'OPEN' : 'CLOSED'}
+            </div>
+          )}
+          {lastPrice && (
+            <div className="mb-4 p-4 bg-gray-800 rounded">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <div className="text-sm text-gray-400">Last Trade (Polygon)</div>
+                  <div className="text-xl font-semibold">
+                    ${lastPrice.price.toFixed(2)}
+                  </div>
+                </div>
+                {lastPrice.close_price !== null && (
+                  <div>
+                    <div className="text-sm text-gray-400">Previous Close (YFinance)</div>
+                    <div className="text-xl font-semibold">
+                      ${lastPrice.close_price.toFixed(2)}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="text-sm text-gray-400 mt-2">
+                Last updated: {new Date(lastPrice.timestamp).toLocaleString()}
+              </div>
             </div>
           )}
           <form onSubmit={handleSymbolSubmit} className="flex gap-4 items-center">

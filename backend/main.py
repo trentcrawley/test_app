@@ -7,8 +7,26 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytz
 import time
+import os
+from polygon import RESTClient
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Check if Polygon API key is available
+polygon_api_key = os.getenv("POLYGON_API_KEY")
+if not polygon_api_key:
+    print("[ERROR] POLYGON_API_KEY environment variable not found!")
+    print("[ERROR] Please make sure POLYGON_API_KEY is set in your system environment variables")
+else:
+    print("[INFO] POLYGON_API_KEY found in environment variables")
+    print(f"[INFO] API Key starts with: {polygon_api_key[:5]}...")
 
 app = FastAPI(title="Financial Data API")
+
+# Initialize Polygon client
+polygon_client = RESTClient(polygon_api_key)
 
 # Configure CORS
 app.add_middleware(
@@ -55,6 +73,12 @@ class CandlestickData(BaseModel):
     low: List[float]
     close: List[float]
     volume: List[int]
+
+class LastPrice(BaseModel):
+    symbol: str
+    price: float
+    timestamp: datetime
+    close_price: Optional[float] = None  # Add close price from yfinance
 
 # def get_stock_data(symbol: str, max_retries: int = 3) -> yf.Ticker:
 #     """Get stock data with retries and better error handling"""
@@ -220,46 +244,84 @@ async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str 
             detail=f"Internal server error: {e}"
         )
 
-
-# @app.get("/api/stock/{symbol}/candlestick", response_model=CandlestickData)
-# async def get_stock_candlestick(
-#     symbol: str,
-#     period: str = "1mo",
-#     interval: str = "1d"
-# ):
-#     try:
-#         stock = get_stock_data(symbol)
+@app.get("/api/stock/{symbol}/last-price", response_model=LastPrice)
+async def get_last_price(symbol: str):
+    try:
+        print(f"[DEBUG] Starting price fetch for {symbol}")
+        current_price = None
+        timestamp = datetime.now(pytz.UTC)
+        close_price = None
         
-#         # Adjust period based on interval
-#         if interval == "1d":
-#             if period == "1d":
-#                 period = "5d"  # Get more data for daily view
-#         elif interval in ["1h", "30m", "15m"]:
-#             if period == "1d":
-#                 period = "5d"  # Get more data for intraday view
+        # Try to get historical data from Polygon first
+        try:
+            print(f"[DEBUG] Fetching Polygon historical data for {symbol}")
+            # Get yesterday's date
+            yesterday = datetime.now(pytz.UTC) - timedelta(days=1)
+            # Format date for Polygon API
+            date_str = yesterday.strftime('%Y-%m-%d')
+            
+            # Get daily aggregates for yesterday
+            aggs = polygon_client.get_aggs(
+                symbol,
+                1,  # multiplier
+                "day",  # timespan
+                date_str,  # from
+                date_str  # to
+            )
+            
+            if aggs and len(aggs) > 0:
+                last_agg = aggs[0]
+                current_price = float(last_agg.close)
+                close_price = float(last_agg.close)
+                timestamp = datetime.fromtimestamp(last_agg.timestamp / 1000, tz=pytz.UTC)
+                print(f"[DEBUG] Got historical price from Polygon: {current_price}")
+        except Exception as poly_error:
+            print(f"[WARNING] Polygon API Error: {str(poly_error)}")
         
-#         hist = fetch_historical_data(stock, period, interval)
-#         if hist.empty:
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail=f"No historical data available for {symbol} with period={period} and interval={interval}"
-#             )
+        # Fallback to yfinance if Polygon fails
+        if not current_price:
+            try:
+                print(f"[DEBUG] Fetching yfinance data for {symbol}")
+                stock = get_stock_data(symbol)
+                info = stock.info
+                
+                # Try to get current price from info
+                current_price = info.get('regularMarketPrice') or info.get('currentPrice')
+                if current_price:
+                    print(f"[DEBUG] Got price from yfinance: {current_price}")
+                    # Use the market time from yfinance if available
+                    if 'regularMarketTime' in info:
+                        timestamp = datetime.fromtimestamp(info['regularMarketTime'], tz=pytz.UTC)
+                
+                # Get close price
+                hist = fetch_historical_data(stock, "1d")
+                close_price = hist['Close'].iloc[-1] if not hist.empty else None
+                print(f"[DEBUG] YFinance close price: {close_price}")
+            except Exception as e:
+                print(f"[WARNING] Could not fetch price from yfinance: {e}")
         
-#         return CandlestickData(
-#             dates=hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
-#             open=hist['Open'].round(2).tolist(),
-#             high=hist['High'].round(2).tolist(),
-#             low=hist['Low'].round(2).tolist(),
-#             close=hist['Close'].round(2).tolist(),
-#             volume=hist['Volume'].tolist()
-#         )
-#     except HTTPException:
-#         raise
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"Error fetching candlestick data for {symbol}: {str(e)}"
-#         )
+        if not current_price:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No price data available for {symbol}"
+            )
+        
+        result = LastPrice(
+            symbol=symbol.upper(),
+            price=float(current_price),
+            timestamp=timestamp,
+            close_price=close_price
+        )
+        print(f"[DEBUG] Returning result: {result}")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Error in get_last_price: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching last price for {symbol}: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn

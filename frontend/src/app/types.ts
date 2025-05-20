@@ -19,6 +19,13 @@ export interface MarketStatus {
   };
 }
 
+export interface LastPrice {
+  symbol: string;
+  price: number;
+  timestamp: string;
+  close_price: number | null;
+}
+
 // Plotly specific types
 export type PlotData = Partial<Data>[];
 export type PlotLayout = Partial<Layout> & {

@@ -7,4 +7,5 @@ pydantic==2.5.2
 httpx==0.25.2
 python-multipart==0.0.6
 pytest==7.4.3
-requests==2.31.0 
+requests==2.31.0
+polygon-api-client==1.12.3 
