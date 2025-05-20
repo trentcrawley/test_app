@@ -56,36 +56,60 @@ class CandlestickData(BaseModel):
     close: List[float]
     volume: List[int]
 
+# def get_stock_data(symbol: str, max_retries: int = 3) -> yf.Ticker:
+#     """Get stock data with retries and better error handling"""
+#     for attempt in range(max_retries):
+#         try:
+#             # Create a new Ticker instance each time
+#             stock = yf.Ticker(symbol)
+            
+#             # Try to get basic info first
+#             info = stock.info
+#             if not info:
+#                 raise ValueError(f"No info available for {symbol}")
+            
+#             # Verify we have a valid symbol
+#             if 'regularMarketPrice' not in info and 'currentPrice' not in info:
+#                 raise ValueError(f"Invalid or delisted symbol: {symbol}")
+            
+#             return stock
+#         except Exception as e:
+#             if attempt == max_retries - 1:  # Last attempt
+#                 if "symbol may be delisted" in str(e):
+#                     raise HTTPException(
+#                         status_code=404,
+#                         detail=f"Symbol {symbol} may be delisted or incorrect. Please verify the symbol."
+#                     )
+#                 raise HTTPException(
+#                     status_code=500,
+#                     detail=f"Error fetching data for {symbol} after {max_retries} attempts: {str(e)}"
+#                 )
+#             time.sleep(1)  # Wait before retrying
 def get_stock_data(symbol: str, max_retries: int = 3) -> yf.Ticker:
-    """Get stock data with retries and better error handling"""
     for attempt in range(max_retries):
         try:
-            # Create a new Ticker instance each time
+            print(f"[DEBUG] Attempt {attempt + 1} to fetch {symbol}")
             stock = yf.Ticker(symbol)
-            
-            # Try to get basic info first
+
+            # ✅ NEW: Print the raw info dict
             info = stock.info
+            print(f"[DEBUG] stock.info = {info}")
+
             if not info:
                 raise ValueError(f"No info available for {symbol}")
-            
-            # Verify we have a valid symbol
+
             if 'regularMarketPrice' not in info and 'currentPrice' not in info:
                 raise ValueError(f"Invalid or delisted symbol: {symbol}")
-            
+
             return stock
         except Exception as e:
-            if attempt == max_retries - 1:  # Last attempt
-                if "symbol may be delisted" in str(e):
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Symbol {symbol} may be delisted or incorrect. Please verify the symbol."
-                    )
+            print(f"[ERROR] get_stock_data failed: {e}")
+            if attempt == max_retries - 1:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Error fetching data for {symbol} after {max_retries} attempts: {str(e)}"
+                    detail=f"Error fetching data for {symbol}: {str(e)}"
                 )
-            time.sleep(1)  # Wait before retrying
-
+            time.sleep(1)
 def fetch_historical_data(stock: yf.Ticker, period: str, interval: str = "1d") -> pd.DataFrame:
     """Fetch historical data with retries"""
     max_retries = 3
