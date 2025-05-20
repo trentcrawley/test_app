@@ -104,7 +104,10 @@ export default function Home() {
   }] : [];
 
   const layout: PlotLayout = {
-    title: { text: `${symbol} Stock Price` },
+    title: { 
+      text: `${symbol} Stock Price (${data?.data_source || 'Loading...'})`,
+      font: { size: 24 }
+    },
     yaxis: { title: { text: 'Price' } },
     xaxis: { title: { text: 'Date' } },
     template: 'plotly_dark',
@@ -144,6 +147,11 @@ export default function Home() {
               <div className="text-sm text-gray-400 mt-2">
                 Last updated: {new Date(lastPrice.timestamp).toLocaleString()}
               </div>
+            </div>
+          )}
+          {data && (
+            <div className="mb-4 p-2 bg-gray-800 rounded">
+              <div className="text-sm text-gray-400">Data Source: <span className="text-white font-semibold">{data.data_source}</span></div>
             </div>
           )}
           <form onSubmit={handleSymbolSubmit} className="flex gap-4 items-center">

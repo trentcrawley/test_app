@@ -7,6 +7,7 @@ export interface CandlestickData {
   low: number[];
   close: number[];
   volume: number[];
+  data_source: string;
 }
 
 export interface MarketStatus {

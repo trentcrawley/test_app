@@ -1,32 +1,39 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import yfinance as yf
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-import pandas as pd
 import pytz
-import time
 import os
-from polygon import RESTClient
 from dotenv import load_dotenv
+import httpx
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-# Check if Polygon API key is available
-polygon_api_key = os.getenv("POLYGON_API_KEY")
-if not polygon_api_key:
-    print("[ERROR] POLYGON_API_KEY environment variable not found!")
-    print("[ERROR] Please make sure POLYGON_API_KEY is set in your system environment variables")
+# Check if API key is available
+eodhd_api_key = os.getenv("EODHD_API_KEY")
+
+if not eodhd_api_key:
+    logger.error("EODHD_API_KEY environment variable not found!")
+    logger.error("Please make sure EODHD_API_KEY is set in your system environment variables")
 else:
-    print("[INFO] POLYGON_API_KEY found in environment variables")
-    print(f"[INFO] API Key starts with: {polygon_api_key[:5]}...")
+    logger.info("EODHD_API_KEY found in environment variables")
+    logger.info(f"API Key starts with: {eodhd_api_key[:5]}...")
 
 app = FastAPI(title="Financial Data API")
 
-# Initialize Polygon client
-polygon_client = RESTClient(polygon_api_key)
+# EODHD API base URL
+EODHD_BASE_URL = "https://eodhd.com/api"
 
 # Configure CORS
 app.add_middleware(
@@ -59,13 +66,6 @@ def is_market_open() -> bool:
     # Check if current time is within market hours
     return MARKET_OPEN <= current_time <= MARKET_CLOSE
 
-class StockData(BaseModel):
-    symbol: str
-    current_price: float
-    change_percent: float
-    volume: int
-    timestamp: datetime
-
 class CandlestickData(BaseModel):
     dates: List[str]
     open: List[float]
@@ -73,90 +73,22 @@ class CandlestickData(BaseModel):
     low: List[float]
     close: List[float]
     volume: List[int]
+    data_source: str = "EODHD"  # Always EODHD now
 
-class LastPrice(BaseModel):
-    symbol: str
-    price: float
-    timestamp: datetime
-    close_price: Optional[float] = None  # Add close price from yfinance
-
-# def get_stock_data(symbol: str, max_retries: int = 3) -> yf.Ticker:
-#     """Get stock data with retries and better error handling"""
-#     for attempt in range(max_retries):
-#         try:
-#             # Create a new Ticker instance each time
-#             stock = yf.Ticker(symbol)
-            
-#             # Try to get basic info first
-#             info = stock.info
-#             if not info:
-#                 raise ValueError(f"No info available for {symbol}")
-            
-#             # Verify we have a valid symbol
-#             if 'regularMarketPrice' not in info and 'currentPrice' not in info:
-#                 raise ValueError(f"Invalid or delisted symbol: {symbol}")
-            
-#             return stock
-#         except Exception as e:
-#             if attempt == max_retries - 1:  # Last attempt
-#                 if "symbol may be delisted" in str(e):
-#                     raise HTTPException(
-#                         status_code=404,
-#                         detail=f"Symbol {symbol} may be delisted or incorrect. Please verify the symbol."
-#                     )
-#                 raise HTTPException(
-#                     status_code=500,
-#                     detail=f"Error fetching data for {symbol} after {max_retries} attempts: {str(e)}"
-#                 )
-#             time.sleep(1)  # Wait before retrying
-def get_stock_data(symbol: str, max_retries: int = 3) -> yf.Ticker:
-    for attempt in range(max_retries):
-        try:
-            print(f"[DEBUG] Attempt {attempt + 1} to fetch {symbol}")
-            stock = yf.Ticker(symbol)
-
-            # ✅ NEW: Print the raw info dict
-            info = stock.info
-            print(f"[DEBUG] stock.info = {info}")
-
-            if not info:
-                raise ValueError(f"No info available for {symbol}")
-
-            if 'regularMarketPrice' not in info and 'currentPrice' not in info:
-                raise ValueError(f"Invalid or delisted symbol: {symbol}")
-
-            return stock
-        except Exception as e:
-            print(f"[ERROR] get_stock_data failed: {e}")
-            if attempt == max_retries - 1:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error fetching data for {symbol}: {str(e)}"
-                )
-            time.sleep(1)
-def fetch_historical_data(stock: yf.Ticker, period: str, interval: str = "1d") -> pd.DataFrame:
-    """Fetch historical data with retries"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            hist = stock.history(period=period, interval=interval)
-            if not hist.empty:
-                return hist
-            time.sleep(1)  # Wait before retrying
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to fetch historical data after {max_retries} attempts: {str(e)}"
-                )
-            time.sleep(1)
-    return pd.DataFrame()  # Return empty DataFrame if all retries failed
+class MarketStatus(BaseModel):
+    is_open: bool
+    timezone: str
+    current_time: str
+    market_hours: dict
 
 @app.get("/")
 async def root():
+    logger.info("="*80)
+    logger.info("ROOT ENDPOINT HIT")
+    logger.info("="*80)
     return {"message": "Financial Data API is running"}
 
-@app.get("/api/market-status")
+@app.get("/api/market-status", response_model=MarketStatus)
 async def get_market_status():
     """Get current market status"""
     return {
@@ -169,158 +101,96 @@ async def get_market_status():
         }
     }
 
-@app.get("/api/stock/{symbol}", response_model=StockData)
-async def get_stock_data_endpoint(symbol: str):
-    try:
-        stock = get_stock_data(symbol)
-        info = stock.info
-        
-        # Try to get current price from info first
-        current_price = info.get('regularMarketPrice') or info.get('currentPrice')
-        if not current_price:
-            # Fallback to historical data
-            hist = fetch_historical_data(stock, "5d")
-            if hist.empty:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No price data available for {symbol}"
-                )
-            current_price = hist['Close'].iloc[-1]
-        
-        # Get previous close for change calculation
-        prev_close = info.get('regularMarketPreviousClose')
-        if not prev_close:
-            hist = fetch_historical_data(stock, "5d")
-            if len(hist) > 1:
-                prev_close = hist['Close'].iloc[-2]
-            else:
-                prev_close = current_price
-        
-        change_percent = ((current_price - prev_close) / prev_close) * 100 if prev_close else 0
-        
-        return StockData(
-            symbol=symbol.upper(),
-            current_price=round(float(current_price), 2),
-            change_percent=round(change_percent, 2),
-            volume=int(info.get('regularMarketVolume', 0)),
-            timestamp=datetime.now(MARKET_TIMEZONE)
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing data for {symbol}: {str(e)}"
-        )
-
 @app.get("/api/stock/{symbol}/candlestick", response_model=CandlestickData)
 async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str = "1d"):
+    logger.info("="*80)
+    logger.info(f"CANDLESTICK DATA REQUEST FOR {symbol}")
+    logger.info("="*80)
+    
     try:
-        print(f"[DEBUG] Fetching candlestick data for {symbol}")
-        stock = get_stock_data(symbol)
-
-        hist = fetch_historical_data(stock, period, interval)
-        print(f"[DEBUG] Retrieved {len(hist)} rows for {symbol}")
-
-        if hist.empty:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No historical data available for {symbol} with period={period} and interval={interval}"
+        # Calculate date range
+        end_date = datetime.now(pytz.UTC)
+        if period == "1y":
+            start_date = end_date - timedelta(days=365)
+        elif period == "6m":
+            start_date = end_date - timedelta(days=180)
+        elif period == "1m":
+            start_date = end_date - timedelta(days=30)
+        else:
+            start_date = end_date - timedelta(days=30)  # Default to 1 month
+        
+        logger.info(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+        
+        # Format symbol for EODHD API
+        formatted_symbol = f"{symbol.upper()}.US"  # Always use .US for US stocks
+        url = f"{EODHD_BASE_URL}/eod/{formatted_symbol}"
+        
+        params = {
+            'api_token': eodhd_api_key,
+            'from': start_date.strftime('%Y-%m-%d'),
+            'to': end_date.strftime('%Y-%m-%d'),
+            'fmt': 'json',
+            'period': 'd',  # daily data
+            'order': 'a'    # ascending dates
+        }
+        
+        logger.info(f"Making request to EODHD API: {url}")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params)
+            logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                logger.error("404 Not Found from EODHD API")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Symbol {symbol} not found in EODHD API"
+                )
+            
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Got {len(data) if data else 0} data points")
+            
+            if not data:
+                logger.error("No data returned from EODHD API")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No historical data available for {symbol}"
+                )
+            
+            # Convert EODHD data to our format
+            dates = []
+            opens = []
+            highs = []
+            lows = []
+            closes = []
+            volumes = []
+            
+            for item in data:
+                dates.append(item['date'])
+                opens.append(float(item['open']))
+                highs.append(float(item['high']))
+                lows.append(float(item['low']))
+                closes.append(float(item['close']))
+                volumes.append(int(item['volume']))
+            
+            logger.info(f"First date: {dates[0]}, Last date: {dates[-1]}")
+            logger.info(f"First close: ${closes[0]:.2f}, Last close: ${closes[-1]:.2f}")
+            
+            return CandlestickData(
+                dates=dates,
+                open=opens,
+                high=highs,
+                low=lows,
+                close=closes,
+                volume=volumes
             )
-
-        return CandlestickData(
-            dates=hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
-            open=hist['Open'].round(2).tolist(),
-            high=hist['High'].round(2).tolist(),
-            low=hist['Low'].round(2).tolist(),
-            close=hist['Close'].round(2).tolist(),
-            volume=hist['Volume'].tolist()
-        )
 
     except Exception as e:
-        print(f"[ERROR] Failed to get candlestick data for {symbol}: {e}")
+        logger.error(f"Error fetching data: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Internal server error: {e}"
-        )
-
-@app.get("/api/stock/{symbol}/last-price", response_model=LastPrice)
-async def get_last_price(symbol: str):
-    try:
-        print(f"[DEBUG] Starting price fetch for {symbol}")
-        current_price = None
-        timestamp = datetime.now(pytz.UTC)
-        close_price = None
-        
-        # Try to get historical data from Polygon first
-        try:
-            print(f"[DEBUG] Fetching Polygon historical data for {symbol}")
-            # Get yesterday's date
-            yesterday = datetime.now(pytz.UTC) - timedelta(days=1)
-            # Format date for Polygon API
-            date_str = yesterday.strftime('%Y-%m-%d')
-            
-            # Get daily aggregates for yesterday
-            aggs = polygon_client.get_aggs(
-                symbol,
-                1,  # multiplier
-                "day",  # timespan
-                date_str,  # from
-                date_str  # to
-            )
-            
-            if aggs and len(aggs) > 0:
-                last_agg = aggs[0]
-                current_price = float(last_agg.close)
-                close_price = float(last_agg.close)
-                timestamp = datetime.fromtimestamp(last_agg.timestamp / 1000, tz=pytz.UTC)
-                print(f"[DEBUG] Got historical price from Polygon: {current_price}")
-        except Exception as poly_error:
-            print(f"[WARNING] Polygon API Error: {str(poly_error)}")
-        
-        # Fallback to yfinance if Polygon fails
-        if not current_price:
-            try:
-                print(f"[DEBUG] Fetching yfinance data for {symbol}")
-                stock = get_stock_data(symbol)
-                info = stock.info
-                
-                # Try to get current price from info
-                current_price = info.get('regularMarketPrice') or info.get('currentPrice')
-                if current_price:
-                    print(f"[DEBUG] Got price from yfinance: {current_price}")
-                    # Use the market time from yfinance if available
-                    if 'regularMarketTime' in info:
-                        timestamp = datetime.fromtimestamp(info['regularMarketTime'], tz=pytz.UTC)
-                
-                # Get close price
-                hist = fetch_historical_data(stock, "1d")
-                close_price = hist['Close'].iloc[-1] if not hist.empty else None
-                print(f"[DEBUG] YFinance close price: {close_price}")
-            except Exception as e:
-                print(f"[WARNING] Could not fetch price from yfinance: {e}")
-        
-        if not current_price:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No price data available for {symbol}"
-            )
-        
-        result = LastPrice(
-            symbol=symbol.upper(),
-            price=float(current_price),
-            timestamp=timestamp,
-            close_price=close_price
-        )
-        print(f"[DEBUG] Returning result: {result}")
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[ERROR] Error in get_last_price: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error fetching last price for {symbol}: {str(e)}"
+            detail=f"Error fetching candlestick data for {symbol}: {str(e)}"
         )
 
 if __name__ == "__main__":
