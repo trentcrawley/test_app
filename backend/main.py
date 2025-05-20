@@ -166,29 +166,20 @@ async def get_stock_data_endpoint(symbol: str):
         )
 
 @app.get("/api/stock/{symbol}/candlestick", response_model=CandlestickData)
-async def get_stock_candlestick(
-    symbol: str,
-    period: str = "1mo",
-    interval: str = "1d"
-):
+async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str = "1d"):
     try:
+        print(f"[DEBUG] Fetching candlestick data for {symbol}")
         stock = get_stock_data(symbol)
-        
-        # Adjust period based on interval
-        if interval == "1d":
-            if period == "1d":
-                period = "5d"  # Get more data for daily view
-        elif interval in ["1h", "30m", "15m"]:
-            if period == "1d":
-                period = "5d"  # Get more data for intraday view
-        
+
         hist = fetch_historical_data(stock, period, interval)
+        print(f"[DEBUG] Retrieved {len(hist)} rows for {symbol}")
+
         if hist.empty:
             raise HTTPException(
                 status_code=404,
                 detail=f"No historical data available for {symbol} with period={period} and interval={interval}"
             )
-        
+
         return CandlestickData(
             dates=hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
             open=hist['Open'].round(2).tolist(),
@@ -197,13 +188,54 @@ async def get_stock_candlestick(
             close=hist['Close'].round(2).tolist(),
             volume=hist['Volume'].tolist()
         )
-    except HTTPException:
-        raise
+
     except Exception as e:
+        print(f"[ERROR] Failed to get candlestick data for {symbol}: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error fetching candlestick data for {symbol}: {str(e)}"
+            detail=f"Internal server error: {e}"
         )
+
+
+# @app.get("/api/stock/{symbol}/candlestick", response_model=CandlestickData)
+# async def get_stock_candlestick(
+#     symbol: str,
+#     period: str = "1mo",
+#     interval: str = "1d"
+# ):
+#     try:
+#         stock = get_stock_data(symbol)
+        
+#         # Adjust period based on interval
+#         if interval == "1d":
+#             if period == "1d":
+#                 period = "5d"  # Get more data for daily view
+#         elif interval in ["1h", "30m", "15m"]:
+#             if period == "1d":
+#                 period = "5d"  # Get more data for intraday view
+        
+#         hist = fetch_historical_data(stock, period, interval)
+#         if hist.empty:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail=f"No historical data available for {symbol} with period={period} and interval={interval}"
+#             )
+        
+#         return CandlestickData(
+#             dates=hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
+#             open=hist['Open'].round(2).tolist(),
+#             high=hist['High'].round(2).tolist(),
+#             low=hist['Low'].round(2).tolist(),
+#             close=hist['Close'].round(2).tolist(),
+#             volume=hist['Volume'].tolist()
+#         )
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Error fetching candlestick data for {symbol}: {str(e)}"
+#         )
 
 if __name__ == "__main__":
     import uvicorn
