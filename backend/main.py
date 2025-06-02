@@ -257,75 +257,83 @@ async def test_yfinance():
         os.environ['HTTPS_PROXY'] = PROXY_URL
         logger.info("Set proxy environment variables")
         
-        import yfinance as yf
-        logger.info("Successfully imported yfinance")
-        
         try:
-            # Try to get AAPL data
-            logger.info("Attempting to get AAPL data...")
-            ticker = yf.Ticker("AAPL")
-            logger.info("Created Ticker object")
-            
-            try:
-                # First verify our IP
-                async with httpx.AsyncClient(
-                    proxies=PROXY_URL,
-                    verify=False,
-                    timeout=30.0
-                ) as client:
-                    ip_response = await client.get("http://httpbin.org/ip")
-                    proxy_ip = ip_response.json()["origin"]
-                    logger.info(f"Proxy IP: {proxy_ip}")
+            # First verify our IP
+            async with httpx.AsyncClient(
+                proxies=PROXY_URL,
+                verify=False,
+                timeout=30.0
+            ) as client:
+                ip_response = await client.get("http://httpbin.org/ip")
+                proxy_ip = ip_response.json()["origin"]
+                logger.info(f"Proxy IP: {proxy_ip}")
                 
-                info = ticker.info
-                logger.info(f"Got ticker info: {info.keys()}")
-                current_price = info.get('regularMarketPrice')
-                company_name = info.get('longName')
-                logger.info(f"Current price: {current_price}, Company name: {company_name}")
+                # Use the same endpoint that works in proxy test
+                yahoo_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?interval=1d&range=1d"
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                    "Accept": "application/json",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Origin": "https://finance.yahoo.com",
+                    "Referer": "https://finance.yahoo.com/quote/AAPL",
+                }
+                
+                logger.info(f"Making request to Yahoo Finance with headers: {headers}")
+                yahoo_response = await client.get(yahoo_url, headers=headers)
+                
+                if yahoo_response.status_code != 200:
+                    return {
+                        "status": "error",
+                        "message": f"Yahoo Finance returned status {yahoo_response.status_code}",
+                        "proxy_used": PROXY_HOST,
+                        "proxy_ip": proxy_ip,
+                        "error_type": "HTTPError",
+                        "error_details": str(yahoo_response.text)
+                    }
+                
+                # Parse the response
+                data = yahoo_response.json()
+                chart_data = data.get('chart', {}).get('result', [{}])[0]
+                meta = chart_data.get('meta', {})
                 
                 return {
                     "status": "success",
-                    "message": "Successfully got data from yfinance",
+                    "message": "Successfully got data from Yahoo Finance",
                     "proxy_used": PROXY_HOST,
                     "proxy_ip": proxy_ip,
                     "data": {
-                        "symbol": "AAPL",
-                        "current_price": current_price,
-                        "company_name": company_name
+                        "symbol": meta.get('symbol'),
+                        "current_price": meta.get('regularMarketPrice'),
+                        "company_name": meta.get('longName')
                     }
                 }
-            except Exception as e:
-                logger.error(f"Error getting ticker info: {str(e)}")
-                logger.error(f"Error type: {type(e).__name__}")
-                logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
-                return {
-                    "status": "error",
-                    "message": f"Error getting ticker info: {str(e)}",
-                    "proxy_used": PROXY_HOST,
-                    "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
-                    "error_type": type(e).__name__,
-                    "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
-                }
                 
-        except Exception as e:
-            logger.error(f"Error creating Ticker object: {str(e)}")
-            logger.error(f"Error type: {type(e).__name__}")
-            logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP Error in Yahoo Finance test: {str(e)}")
             return {
                 "status": "error",
-                "message": f"Error creating Ticker object: {str(e)}",
+                "message": f"Yahoo Finance HTTP error: {str(e)}",
                 "proxy_used": PROXY_HOST,
+                "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
+                "error_type": type(e).__name__,
+                "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
+            }
+        except Exception as e:
+            logger.error(f"Error in Yahoo Finance test: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Yahoo Finance test failed: {str(e)}",
+                "proxy_used": PROXY_HOST,
+                "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
                 "error_type": type(e).__name__,
                 "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
             }
             
     except Exception as e:
-        logger.error(f"Error importing yfinance: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
+        logger.error(f"Error in proxy test: {str(e)}")
         return {
             "status": "error",
-            "message": f"Error importing yfinance: {str(e)}",
+            "message": f"Error: {str(e)}",
             "proxy_used": PROXY_HOST,
             "error_type": type(e).__name__,
             "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
