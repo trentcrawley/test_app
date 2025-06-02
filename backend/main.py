@@ -435,9 +435,27 @@ async def test_proxy_ip():
             verify=False,
             timeout=30.0
         ) as client:
+            # Test with httpbin
             proxy_response = await client.get("http://httpbin.org/ip")
             proxy_ip = proxy_response.json()["origin"]
-            logger.info(f"Proxy IP: {proxy_ip}")
+            logger.info(f"Proxy IP (httpbin): {proxy_ip}")
+            
+            # Test with Yahoo Finance
+            try:
+                logger.info("Testing with Yahoo Finance...")
+                yahoo_response = await client.get(
+                    "https://query2.finance.yahoo.com/v10/finance/quoteSummary/AAPL?modules=price",
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    }
+                )
+                logger.info(f"Yahoo Finance response status: {yahoo_response.status_code}")
+                logger.info(f"Yahoo Finance headers: {dict(yahoo_response.headers)}")
+            except Exception as e:
+                logger.error(f"Yahoo Finance test failed: {str(e)}")
+                if hasattr(e, 'response'):
+                    logger.error(f"Response status: {e.response.status_code if e.response else 'No response'}")
+                    logger.error(f"Response headers: {dict(e.response.headers) if e.response else 'No headers'}")
             
             # Also get headers to see what the proxy is sending
             headers_response = await client.get("http://httpbin.org/headers")
@@ -452,7 +470,8 @@ async def test_proxy_ip():
             "direct_ip": direct_ip,
             "proxy_ip": proxy_ip,
             "proxy_used": proxy_host,
-            "ips_match": direct_ip == proxy_ip  # If True, proxy isn't working
+            "ips_match": direct_ip == proxy_ip,  # If True, proxy isn't working
+            "proxy_headers": headers_response.json()['headers'] if 'headers_response' in locals() else None
         }
         
     except Exception as e:
