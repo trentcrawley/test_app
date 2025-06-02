@@ -23,6 +23,37 @@ interface ProxyStatus {
   message?: string;
 }
 
+interface YFinanceResult {
+  status: string;
+  message: string;
+  data?: {
+    symbol: string;
+    current_price: number | string;
+    company_name: string;
+  };
+  error_type?: string;
+}
+
+interface ProxyResult {
+  status: string;
+  message: string;
+  proxy_used: string;
+  proxy_ip?: string;
+  yahoo_response?: {
+    status: number;
+    headers: Record<string, string>;
+    body?: string;
+    request_headers: Record<string, string>;
+    proxy_ip: string;
+    crumb_used?: string;
+  };
+}
+
+interface TestResult {
+  yfinance: YFinanceResult;
+  proxy: ProxyResult;
+}
+
 export default function Home() {
   const [symbol, setSymbol] = useState('AAPL');
   const [data, setData] = useState<CandlestickData | null>(null);
@@ -30,7 +61,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null);
-  const [testResult, setTestResult] = useState<any>(null);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testingYFinance, setTestingYFinance] = useState(false);
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
 
@@ -88,10 +119,42 @@ export default function Home() {
   const testYFinance = async () => {
     setTestingYFinance(true);
     setTestResult(null);
+    setError(null);
     try {
-      const response = await fetch(`${API_URL}/api/test-yfinance`);
-      const data = await response.json();
-      setTestResult(data);
+      // First test yfinance directly
+      const yfResponse = await fetch(`${API_URL}/api/test-yfinance`);
+      const yfData = await yfResponse.json();
+      console.log("yfinance test result:", yfData);
+      
+      // Then test proxy with Yahoo Finance
+      const proxyResponse = await fetch(`${API_URL}/api/test-proxy-yahoo`);
+      const proxyData = await proxyResponse.json();
+      console.log("proxy test result:", proxyData);
+      
+      setTestResult({
+        yfinance: yfData,
+        proxy: proxyData
+      });
+      
+      // If we got Yahoo Finance response details, show them
+      if (proxyData.yahoo_response) {
+        const yahooStatus = proxyData.yahoo_response.status;
+        const yahooHeaders = Object.entries(proxyData.yahoo_response.headers)
+          .map(([key, value]) => `${key}: ${value}`)
+          .join('\n');
+        const requestHeaders = Object.entries(proxyData.yahoo_response.request_headers)
+          .map(([key, value]) => `${key}: ${value}`)
+          .join('\n');
+        const yahooBody = proxyData.yahoo_response.body || 'No body';
+        
+        setError(
+          `Yahoo Finance Response:\n` +
+          `Status: ${yahooStatus}\n\n` +
+          `Request Headers:\n${requestHeaders}\n\n` +
+          `Response Headers:\n${yahooHeaders}\n\n` +
+          `Body:\n${yahooBody}`
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to test yfinance');
     } finally {
@@ -171,14 +234,48 @@ export default function Home() {
               disabled={testingYFinance}
               className="px-4 py-2 bg-green-600 rounded hover:bg-green-700 disabled:opacity-50"
             >
-              {testingYFinance ? 'Testing yfinance...' : 'Test yfinance Access'}
+              {testingYFinance ? 'Testing...' : 'Test yfinance & Proxy'}
             </button>
           </div>
           {testResult && (
             <div className="mb-4 p-4 bg-gray-800 rounded">
-              <h3 className="font-bold mb-2">yfinance Test Result:</h3>
-              <pre className="whitespace-pre-wrap text-sm">
-                {JSON.stringify(testResult, null, 2)}
+              <h3 className="font-bold mb-2">Test Results:</h3>
+              
+              <div className="mb-4">
+                <h4 className="font-semibold text-green-400 mb-2">yfinance Test:</h4>
+                <div className="mb-2">
+                  <span className="font-semibold">Status:</span> {testResult.yfinance.status}
+                </div>
+                {testResult.yfinance.data && (
+                  <div className="mt-2 p-2 bg-gray-700 rounded">
+                    <pre className="whitespace-pre-wrap text-sm">
+                      {JSON.stringify(testResult.yfinance.data, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+              
+              <div>
+                <h4 className="font-semibold text-blue-400 mb-2">Proxy Test:</h4>
+                <div className="mb-2">
+                  <span className="font-semibold">Status:</span> {testResult.proxy.status}
+                </div>
+                <div className="mb-2">
+                  <span className="font-semibold">Proxy Used:</span> {testResult.proxy.proxy_used}
+                </div>
+                {testResult.proxy.proxy_ip && (
+                  <div className="mb-2">
+                    <span className="font-semibold">Proxy IP:</span> {testResult.proxy.proxy_ip}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {error && (
+            <div className="mt-4 p-4 bg-red-900/50 rounded">
+              <h3 className="font-bold mb-2 text-red-400">Response Details:</h3>
+              <pre className="whitespace-pre-wrap font-mono text-sm text-red-200">
+                {error}
               </pre>
             </div>
           )}
