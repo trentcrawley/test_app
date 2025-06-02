@@ -17,7 +17,11 @@ from requests.exceptions import RequestException
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(),  # Log to stdout
+        logging.FileHandler('app.log')  # Log to file
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,14 @@ eodhd_api_key = os.getenv("EODHD_API_KEY")
 proxy_username = os.getenv("PROXY_USERNAME")
 proxy_password = os.getenv("PROXY_PASSWORD")
 proxy_host = os.getenv("PROXY_HOST")
+
+# Log startup configuration
+logger.info("="*80)
+logger.info("APPLICATION STARTUP")
+logger.info(f"Current working directory: {os.getcwd()}")
+logger.info(f"Environment variables loaded: {bool(proxy_username and proxy_password and proxy_host)}")
+logger.info(f"Proxy host: {proxy_host}")
+logger.info("="*80)
 
 if not eodhd_api_key:
     logger.error("EODHD_API_KEY environment variable not found!")
@@ -324,6 +336,136 @@ async def test_yfinance():
             "error_details": str(e)
         }
     finally:
+        logger.info("="*80)
+
+@app.get("/api/test-proxy-simple")
+async def test_proxy_simple():
+    """Simple test endpoint that just tries to access a website through the proxy"""
+    logger.info("="*80)
+    logger.info("SIMPLE PROXY TEST")
+    
+    test_urls = [
+        "http://httpbin.org/ip",  # Returns your IP address
+        "http://httpbin.org/headers",  # Returns request headers
+        "https://www.google.com"  # Basic website
+    ]
+    
+    results = []
+    
+    try:
+        # Set proxy
+        os.environ['HTTP_PROXY'] = PROXY_URL
+        os.environ['HTTPS_PROXY'] = PROXY_URL
+        logger.info("Set proxy environment variables")
+        
+        async with httpx.AsyncClient(
+            proxies=PROXY_URL,
+            verify=False,
+            timeout=30.0
+        ) as client:
+            for url in test_urls:
+                try:
+                    logger.info(f"Testing {url}...")
+                    response = await client.get(url)
+                    logger.info(f"Status for {url}: {response.status_code}")
+                    logger.info(f"Headers: {dict(response.headers)}")
+                    
+                    # Try to get response content
+                    try:
+                        content = response.json() if 'json' in response.headers.get('content-type', '') else response.text[:200]
+                        logger.info(f"Response content: {content}")
+                    except:
+                        logger.info("Could not decode response content")
+                    
+                    results.append({
+                        "url": url,
+                        "status": response.status_code,
+                        "success": True,
+                        "headers": dict(response.headers)
+                    })
+                except Exception as e:
+                    logger.error(f"Error with {url}: {str(e)}")
+                    results.append({
+                        "url": url,
+                        "error": str(e),
+                        "success": False
+                    })
+        
+        return {
+            "status": "success",
+            "proxy_used": proxy_host,
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in proxy test: {str(e)}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "proxy_used": proxy_host
+        }
+    finally:
+        # Clear proxy
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
+        logger.info("Cleared proxy environment variables")
+        logger.info("="*80)
+
+@app.get("/api/test-proxy-ip")
+async def test_proxy_ip():
+    """Test endpoint to verify if proxy is actually being used by checking IP"""
+    logger.info("="*80)
+    logger.info("TESTING PROXY IP")
+    
+    try:
+        # First get IP without proxy
+        logger.info("Getting IP without proxy...")
+        async with httpx.AsyncClient() as client:
+            direct_response = await client.get("http://httpbin.org/ip")
+            direct_ip = direct_response.json()["origin"]
+            logger.info(f"Direct IP (without proxy): {direct_ip}")
+        
+        # Now get IP with proxy
+        logger.info("Getting IP with proxy...")
+        os.environ['HTTP_PROXY'] = PROXY_URL
+        os.environ['HTTPS_PROXY'] = PROXY_URL
+        
+        async with httpx.AsyncClient(
+            proxies=PROXY_URL,
+            verify=False,
+            timeout=30.0
+        ) as client:
+            proxy_response = await client.get("http://httpbin.org/ip")
+            proxy_ip = proxy_response.json()["origin"]
+            logger.info(f"Proxy IP: {proxy_ip}")
+            
+            # Also get headers to see what the proxy is sending
+            headers_response = await client.get("http://httpbin.org/headers")
+            logger.info(f"Proxy headers: {headers_response.json()['headers']}")
+        
+        # Clear proxy
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
+        
+        return {
+            "status": "success",
+            "direct_ip": direct_ip,
+            "proxy_ip": proxy_ip,
+            "proxy_used": proxy_host,
+            "ips_match": direct_ip == proxy_ip  # If True, proxy isn't working
+        }
+        
+    except Exception as e:
+        logger.error(f"Error testing proxy IP: {str(e)}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "proxy_used": proxy_host
+        }
+    finally:
+        # Clear proxy
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
         logger.info("="*80)
 
 if __name__ == "__main__":
