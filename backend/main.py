@@ -238,28 +238,49 @@ async def test_yfinance():
     logger.info("="*80)
     logger.info("TESTING YFINANCE PROXY CONNECTION")
     logger.info(f"Using ProxyScrape proxy: {PROXY_HOST}")
+    logger.info(f"Full proxy URL (without password): http://{PROXY_USERNAME}:****@{PROXY_HOST}")
     
     try:
         # Set proxy as environment variable for yfinance to use
         os.environ['HTTP_PROXY'] = PROXY_URL
         os.environ['HTTPS_PROXY'] = PROXY_URL
+        logger.info("Set HTTP_PROXY and HTTPS_PROXY environment variables")
         
+        # Test proxy with a simple request first
         logger.info("Testing proxy with direct HTTP request...")
-        async with httpx.AsyncClient(proxies=PROXY_URL) as client:
+        async with httpx.AsyncClient(
+            proxies=PROXY_URL,
+            verify=False,  # Temporarily disable SSL verification for debugging
+            timeout=30.0  # Increase timeout
+        ) as client:
             try:
-                test_response = await client.get("https://www.google.com", timeout=10.0)
+                logger.info("Attempting to connect to Google...")
+                test_response = await client.get(
+                    "https://www.google.com",
+                    follow_redirects=True
+                )
                 logger.info(f"Proxy test request status: {test_response.status_code}")
+                logger.info(f"Response headers: {dict(test_response.headers)}")
+                logger.info(f"Response content length: {len(test_response.content)}")
             except Exception as e:
                 logger.error(f"Proxy test request failed: {str(e)}")
+                logger.error(f"Error type: {type(e).__name__}")
+                if hasattr(e, 'response'):
+                    logger.error(f"Response status: {e.response.status_code if e.response else 'No response'}")
+                    logger.error(f"Response headers: {dict(e.response.headers) if e.response else 'No headers'}")
         
         # Now try yfinance
         logger.info("Attempting yfinance request...")
+        logger.info("Creating yfinance Ticker object...")
         ticker = yf.Ticker("AAPL")
+        logger.info("Fetching ticker info...")
         info = ticker.info
+        logger.info("Successfully got ticker info")
         
         # Clear proxy environment variables
         os.environ.pop('HTTP_PROXY', None)
         os.environ.pop('HTTPS_PROXY', None)
+        logger.info("Cleared proxy environment variables")
         
         logger.info("Successfully got yfinance data using ProxyScrape proxy")
         logger.info(f"Current price: ${info.get('currentPrice', 'N/A')}")
@@ -279,10 +300,22 @@ async def test_yfinance():
         # Clear proxy environment variables in case of error
         os.environ.pop('HTTP_PROXY', None)
         os.environ.pop('HTTPS_PROXY', None)
+        logger.info("Cleared proxy environment variables after error")
         
         logger.error(f"Error accessing yfinance: {str(e)}")
         logger.error(f"Error type: {type(e).__name__}")
         logger.error(f"Error details: {str(e)}")
+        
+        # Log additional error details if available
+        if hasattr(e, 'response'):
+            logger.error(f"Response status: {e.response.status_code if e.response else 'No response'}")
+            logger.error(f"Response headers: {dict(e.response.headers) if e.response else 'No headers'}")
+            if e.response and e.response.content:
+                try:
+                    logger.error(f"Response content: {e.response.content.decode()}")
+                except:
+                    logger.error("Could not decode response content")
+        
         return {
             "status": "error",
             "message": f"Could not access yfinance: {str(e)}",
