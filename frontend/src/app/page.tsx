@@ -30,6 +30,7 @@ interface YFinanceResult {
   proxy_ip?: string;
   error_type?: string;
   error_details?: string;
+  data_source?: 'yfinance' | 'direct_api';
   data?: {
     symbol: string;
     current_price: number | string;
@@ -141,7 +142,8 @@ export default function Home() {
           const chartData = proxyBody.chart?.result?.[0];
           if (chartData?.meta) {
             yfData.status = "success";
-            yfData.message = "Successfully got data from Yahoo Finance (via proxy)";
+            yfData.message = "Successfully got data from Yahoo Finance (via direct API)";
+            yfData.data_source = "direct_api";
             yfData.data = {
               symbol: chartData.meta.symbol,
               current_price: chartData.meta.regularMarketPrice,
@@ -151,6 +153,8 @@ export default function Home() {
         } catch (e) {
           console.error("Error parsing proxy response:", e);
         }
+      } else if (yfData.status === "success") {
+        yfData.data_source = "yfinance";
       }
       
       setTestResult({
@@ -268,6 +272,13 @@ export default function Home() {
                 <div className="bg-gray-100 p-4 rounded-lg">
                   <p className="font-medium">Status: {testResult.yfinance.status}</p>
                   <p className="text-sm text-gray-600">{testResult.yfinance.message}</p>
+                  {testResult.yfinance.data_source && (
+                    <p className="text-sm font-medium">
+                      Data Source: <span className={testResult.yfinance.data_source === 'yfinance' ? 'text-blue-600' : 'text-purple-600'}>
+                        {testResult.yfinance.data_source === 'yfinance' ? 'yfinance Library' : 'Direct Yahoo Finance API'}
+                      </span>
+                    </p>
+                  )}
                   {testResult.yfinance.proxy_used && (
                     <p className="text-sm text-gray-600">Proxy Used: {testResult.yfinance.proxy_used}</p>
                   )}
