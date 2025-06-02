@@ -78,6 +78,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]  # Explicitly expose all headers
 )
 
 # Market hours configuration
