@@ -134,6 +134,25 @@ export default function Home() {
       const proxyData = await proxyResponse.json();
       console.log("proxy test result:", proxyData);
       
+      // If yfinance test failed but we have proxy data, try to extract info from proxy response
+      if (yfData.status === "error" && proxyData.yahoo_response?.body) {
+        try {
+          const proxyBody = JSON.parse(proxyData.yahoo_response.body);
+          const chartData = proxyBody.chart?.result?.[0];
+          if (chartData?.meta) {
+            yfData.status = "success";
+            yfData.message = "Successfully got data from Yahoo Finance (via proxy)";
+            yfData.data = {
+              symbol: chartData.meta.symbol,
+              current_price: chartData.meta.regularMarketPrice,
+              company_name: chartData.meta.longName
+            };
+          }
+        } catch (e) {
+          console.error("Error parsing proxy response:", e);
+        }
+      }
+      
       setTestResult({
         yfinance: yfData,
         proxy: proxyData
