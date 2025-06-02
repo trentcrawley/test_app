@@ -246,96 +246,146 @@ async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str 
 
 @app.get("/api/test-yfinance")
 async def test_yfinance():
-    """Test endpoint to check if yfinance is working with authenticated proxy"""
+    """Test endpoint to check if yfinance is working"""
     logger.info("="*80)
-    logger.info("TESTING YFINANCE PROXY CONNECTION")
-    logger.info(f"Using ProxyScrape proxy: {PROXY_HOST}")
-    logger.info(f"Full proxy URL (without password): http://{PROXY_USERNAME}:****@{PROXY_HOST}")
+    logger.info("TESTING YFINANCE")
     
     try:
-        # Set proxy as environment variable for yfinance to use
-        os.environ['HTTP_PROXY'] = PROXY_URL
-        os.environ['HTTPS_PROXY'] = PROXY_URL
-        logger.info("Set HTTP_PROXY and HTTPS_PROXY environment variables")
-        
-        # Test proxy with a simple request first
-        logger.info("Testing proxy with direct HTTP request...")
-        async with httpx.AsyncClient(
-            proxies=PROXY_URL,
-            verify=False,  # Temporarily disable SSL verification for debugging
-            timeout=30.0  # Increase timeout
-        ) as client:
-            try:
-                logger.info("Attempting to connect to Google...")
-                test_response = await client.get(
-                    "https://www.google.com",
-                    follow_redirects=True
-                )
-                logger.info(f"Proxy test request status: {test_response.status_code}")
-                logger.info(f"Response headers: {dict(test_response.headers)}")
-                logger.info(f"Response content length: {len(test_response.content)}")
-            except Exception as e:
-                logger.error(f"Proxy test request failed: {str(e)}")
-                logger.error(f"Error type: {type(e).__name__}")
-                if hasattr(e, 'response'):
-                    logger.error(f"Response status: {e.response.status_code if e.response else 'No response'}")
-                    logger.error(f"Response headers: {dict(e.response.headers) if e.response else 'No headers'}")
-        
-        # Now try yfinance
-        logger.info("Attempting yfinance request...")
-        logger.info("Creating yfinance Ticker object...")
+        # Test yfinance directly first
+        logger.info("Testing yfinance directly...")
         ticker = yf.Ticker("AAPL")
-        logger.info("Fetching ticker info...")
         info = ticker.info
         logger.info("Successfully got ticker info")
-        
-        # Clear proxy environment variables
-        os.environ.pop('HTTP_PROXY', None)
-        os.environ.pop('HTTPS_PROXY', None)
-        logger.info("Cleared proxy environment variables")
-        
-        logger.info("Successfully got yfinance data using ProxyScrape proxy")
-        logger.info(f"Current price: ${info.get('currentPrice', 'N/A')}")
-        logger.info(f"Company name: {info.get('longName', 'N/A')}")
         
         return {
             "status": "success",
             "message": "Successfully accessed yfinance",
-            "proxy_used": PROXY_HOST,
             "data": {
                 "symbol": "AAPL",
                 "current_price": info.get('currentPrice', 'N/A'),
                 "company_name": info.get('longName', 'N/A')
             }
         }
+                
     except Exception as e:
-        # Clear proxy environment variables in case of error
-        os.environ.pop('HTTP_PROXY', None)
-        os.environ.pop('HTTPS_PROXY', None)
-        logger.info("Cleared proxy environment variables after error")
-        
-        logger.error(f"Error accessing yfinance: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Error details: {str(e)}")
-        
-        # Log additional error details if available
-        if hasattr(e, 'response'):
-            logger.error(f"Response status: {e.response.status_code if e.response else 'No response'}")
-            logger.error(f"Response headers: {dict(e.response.headers) if e.response else 'No headers'}")
-            if e.response and e.response.content:
-                try:
-                    logger.error(f"Response content: {e.response.content.decode()}")
-                except:
-                    logger.error("Could not decode response content")
-        
+        logger.error(f"Error in yfinance test: {str(e)}")
         return {
             "status": "error",
-            "message": f"Could not access yfinance: {str(e)}",
-            "proxy_used": PROXY_HOST,
-            "error_type": type(e).__name__,
-            "error_details": str(e)
+            "message": f"Error accessing yfinance: {str(e)}",
+            "error_type": type(e).__name__
         }
     finally:
+        logger.info("="*80)
+
+@app.get("/api/test-proxy-yahoo")
+async def test_proxy_yahoo():
+    """Test endpoint to check if proxy works with Yahoo Finance"""
+    logger.info("="*80)
+    logger.info("TESTING PROXY WITH YAHOO FINANCE")
+    logger.info(f"Using ProxyScrape proxy: {PROXY_HOST}")
+    
+    try:
+        # Set proxy as environment variable
+        os.environ['HTTP_PROXY'] = PROXY_URL
+        os.environ['HTTPS_PROXY'] = PROXY_URL
+        
+        async with httpx.AsyncClient(
+            proxies=PROXY_URL,
+            verify=False,
+            timeout=30.0
+        ) as client:
+            try:
+                # First get our IP
+                ip_response = await client.get("http://httpbin.org/ip")
+                proxy_ip = ip_response.json()["origin"]
+                logger.info(f"Proxy IP: {proxy_ip}")
+                
+                # Try Yahoo Finance's newer API endpoint
+                yahoo_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?interval=1d&range=1d"
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                    "Accept": "application/json",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Origin": "https://finance.yahoo.com",
+                    "Referer": "https://finance.yahoo.com/quote/AAPL",
+                }
+                
+                logger.info(f"Making request to Yahoo Finance with headers: {headers}")
+                yahoo_response = await client.get(yahoo_url, headers=headers)
+                
+                # Get all response details
+                response_details = {
+                    "status": yahoo_response.status_code,
+                    "headers": dict(yahoo_response.headers),
+                    "body": yahoo_response.text[:1000] if yahoo_response.text else None,
+                    "request_headers": dict(yahoo_response.request.headers),
+                    "proxy_ip": proxy_ip
+                }
+                
+                logger.info(f"Yahoo Finance response details: {response_details}")
+                
+                if yahoo_response.status_code != 200:
+                    return {
+                        "status": "error",
+                        "message": f"Yahoo Finance returned status {yahoo_response.status_code}",
+                        "proxy_used": PROXY_HOST,
+                        "proxy_ip": proxy_ip,
+                        "yahoo_response": response_details
+                    }
+                
+                return {
+                    "status": "success",
+                    "message": "Successfully accessed Yahoo Finance through proxy",
+                    "proxy_used": PROXY_HOST,
+                    "proxy_ip": proxy_ip,
+                    "yahoo_response": response_details
+                }
+                
+            except httpx.HTTPError as e:
+                logger.error(f"HTTP Error in Yahoo Finance test: {str(e)}")
+                response_details = {
+                    "status": e.response.status_code if e.response else None,
+                    "headers": dict(e.response.headers) if e.response else None,
+                    "body": e.response.text[:1000] if e.response and e.response.text else None,
+                    "request_headers": dict(e.response.request.headers) if e.response else None,
+                    "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
+                    "error": str(e)
+                }
+                return {
+                    "status": "error",
+                    "message": f"Yahoo Finance HTTP error: {str(e)}",
+                    "proxy_used": PROXY_HOST,
+                    "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
+                    "yahoo_response": response_details
+                }
+            except Exception as e:
+                logger.error(f"Error in Yahoo Finance test: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Yahoo Finance test failed: {str(e)}",
+                    "proxy_used": PROXY_HOST,
+                    "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
+                    "yahoo_response": {
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None
+                    }
+                }
+                
+    except Exception as e:
+        logger.error(f"Error in proxy test: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Error: {str(e)}",
+            "proxy_used": PROXY_HOST,
+            "yahoo_response": {
+                "error": str(e),
+                "error_type": type(e).__name__
+            }
+        }
+    finally:
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
         logger.info("="*80)
 
 @app.get("/api/test-proxy-simple")
