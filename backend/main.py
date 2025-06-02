@@ -246,11 +246,17 @@ async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str 
 
 @app.get("/api/test-yfinance")
 async def test_yfinance():
-    """Test endpoint to check if yfinance works without proxy"""
+    """Test endpoint to check if yfinance works with proxy"""
     logger.info("="*80)
-    logger.info("TESTING YFINANCE DIRECTLY")
+    logger.info("TESTING YFINANCE WITH PROXY")
+    logger.info(f"Using ProxyScrape proxy: {PROXY_HOST}")
     
     try:
+        # Set proxy as environment variable
+        os.environ['HTTP_PROXY'] = PROXY_URL
+        os.environ['HTTPS_PROXY'] = PROXY_URL
+        logger.info("Set proxy environment variables")
+        
         import yfinance as yf
         logger.info("Successfully imported yfinance")
         
@@ -261,6 +267,16 @@ async def test_yfinance():
             logger.info("Created Ticker object")
             
             try:
+                # First verify our IP
+                async with httpx.AsyncClient(
+                    proxies=PROXY_URL,
+                    verify=False,
+                    timeout=30.0
+                ) as client:
+                    ip_response = await client.get("http://httpbin.org/ip")
+                    proxy_ip = ip_response.json()["origin"]
+                    logger.info(f"Proxy IP: {proxy_ip}")
+                
                 info = ticker.info
                 logger.info(f"Got ticker info: {info.keys()}")
                 current_price = info.get('regularMarketPrice')
@@ -270,6 +286,8 @@ async def test_yfinance():
                 return {
                     "status": "success",
                     "message": "Successfully got data from yfinance",
+                    "proxy_used": PROXY_HOST,
+                    "proxy_ip": proxy_ip,
                     "data": {
                         "symbol": "AAPL",
                         "current_price": current_price,
@@ -283,6 +301,8 @@ async def test_yfinance():
                 return {
                     "status": "error",
                     "message": f"Error getting ticker info: {str(e)}",
+                    "proxy_used": PROXY_HOST,
+                    "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
                     "error_type": type(e).__name__,
                     "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
                 }
@@ -294,6 +314,7 @@ async def test_yfinance():
             return {
                 "status": "error",
                 "message": f"Error creating Ticker object: {str(e)}",
+                "proxy_used": PROXY_HOST,
                 "error_type": type(e).__name__,
                 "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
             }
@@ -305,10 +326,15 @@ async def test_yfinance():
         return {
             "status": "error",
             "message": f"Error importing yfinance: {str(e)}",
+            "proxy_used": PROXY_HOST,
             "error_type": type(e).__name__,
             "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
         }
     finally:
+        # Clear proxy
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
+        logger.info("Cleared proxy environment variables")
         logger.info("="*80)
 
 @app.get("/api/test-proxy-yahoo")
