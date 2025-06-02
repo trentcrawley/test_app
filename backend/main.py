@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
@@ -35,6 +35,20 @@ else:
     logger.info(f"API Key starts with: {eodhd_api_key[:5]}...")
 
 app = FastAPI(title="Financial Data API")
+
+# Custom middleware to log CORS requests
+@app.middleware("http")
+async def log_requests(request, call_next):
+    logger.info("="*80)
+    logger.info(f"Incoming request: {request.method} {request.url}")
+    logger.info(f"Origin: {request.headers.get('origin', 'No origin')}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    logger.info("="*80)
+    response = await call_next(request)
+    logger.info(f"Response status: {response.status_code}")
+    logger.info(f"Response headers: {dict(response.headers)}")
+    logger.info("="*80)
+    return response
 
 # EODHD API base URL
 EODHD_BASE_URL = "https://eodhd.com/api"
@@ -126,9 +140,10 @@ PROXY_LIST = [
 ]
 
 @app.get("/")
-async def root():
+async def root(request: Request):
     logger.info("="*80)
     logger.info("ROOT ENDPOINT HIT")
+    logger.info(f"Request headers: {dict(request.headers)}")
     logger.info("="*80)
     return {"message": "Financial Data API is running"}
 
