@@ -13,6 +13,16 @@ const Plot = dynamic(() => import('react-plotly.js'), {
 // Get API URL from environment variable, fallback to localhost for development
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+// Add type for proxy status
+interface ProxyStatus {
+  status: 'success' | 'error';
+  direct_ip: string;
+  proxy_ip: string;
+  proxy_used: string;
+  ips_match: boolean;
+  message?: string;
+}
+
 export default function Home() {
   const [symbol, setSymbol] = useState('AAPL');
   const [data, setData] = useState<CandlestickData | null>(null);
@@ -22,6 +32,7 @@ export default function Home() {
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null);
   const [testResult, setTestResult] = useState<any>(null);
   const [testingYFinance, setTestingYFinance] = useState(false);
+  const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
 
   const fetchMarketStatus = async () => {
     try {
@@ -85,6 +96,23 @@ export default function Home() {
       setError(err instanceof Error ? err.message : 'Failed to test yfinance');
     } finally {
       setTestingYFinance(false);
+    }
+  };
+
+  const testProxyIP = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("https://test-app-wqrp.onrender.com/api/test-proxy-ip");
+      const data = await response.json() as ProxyStatus;
+      setProxyStatus(data);
+      console.log("Proxy test result:", data);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+      setError(errorMessage);
+      console.error("Error testing proxy:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -206,6 +234,35 @@ export default function Home() {
           {error && (
             <div className="mt-4 p-4 bg-red-900/50 rounded text-red-200">
               {error}
+            </div>
+          )}
+        </div>
+
+        <div className="mb-8 p-4 border rounded-lg bg-gray-50 w-full max-w-md">
+          <h2 className="text-xl font-semibold mb-4">Proxy Connection Test</h2>
+          <button
+            onClick={testProxyIP}
+            disabled={loading}
+            className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 disabled:bg-gray-400"
+          >
+            {loading ? "Testing..." : "Test Proxy Connection"}
+          </button>
+          
+          {proxyStatus && (
+            <div className="mt-4 text-sm">
+              <p>Direct IP: {proxyStatus.direct_ip}</p>
+              <p>Proxy IP: {proxyStatus.proxy_ip}</p>
+              <p className={proxyStatus.ips_match ? "text-red-500" : "text-green-500"}>
+                {proxyStatus.ips_match 
+                  ? "⚠️ Proxy not working (IPs match)" 
+                  : "✅ Proxy working (different IPs)"}
+              </p>
+            </div>
+          )}
+          
+          {error && (
+            <div className="mt-4 text-red-500 text-sm">
+              Error: {error}
             </div>
           )}
         </div>
