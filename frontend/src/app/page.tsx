@@ -20,6 +20,8 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null);
+  const [testResult, setTestResult] = useState<any>(null);
+  const [testingYFinance, setTestingYFinance] = useState(false);
 
   const fetchMarketStatus = async () => {
     try {
@@ -72,6 +74,20 @@ export default function Home() {
     }
   };
 
+  const testYFinance = async () => {
+    setTestingYFinance(true);
+    setTestResult(null);
+    try {
+      const response = await fetch(`${API_URL}/api/test-yfinance`);
+      const data = await response.json();
+      setTestResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to test yfinance');
+    } finally {
+      setTestingYFinance(false);
+    }
+  };
+
   useEffect(() => {
     console.log('Component mounted, fetching initial data...');
     fetchMarketStatus();
@@ -121,6 +137,23 @@ export default function Home() {
       <div className="max-w-7xl mx-auto">
         <div className="mb-8">
           <h1 className="text-3xl font-bold mb-4">Stock Chart Viewer</h1>
+          <div className="flex gap-4 mb-4">
+            <button
+              onClick={testYFinance}
+              disabled={testingYFinance}
+              className="px-4 py-2 bg-green-600 rounded hover:bg-green-700 disabled:opacity-50"
+            >
+              {testingYFinance ? 'Testing yfinance...' : 'Test yfinance Access'}
+            </button>
+          </div>
+          {testResult && (
+            <div className="mb-4 p-4 bg-gray-800 rounded">
+              <h3 className="font-bold mb-2">yfinance Test Result:</h3>
+              <pre className="whitespace-pre-wrap text-sm">
+                {JSON.stringify(testResult, null, 2)}
+              </pre>
+            </div>
+          )}
           {marketStatus && (
             <div className={`mb-4 p-2 rounded ${marketStatus.is_open ? 'bg-green-900/50' : 'bg-red-900/50'}`}>
               Market is currently {marketStatus.is_open ? 'OPEN' : 'CLOSED'}

@@ -8,6 +8,10 @@ import os
 from dotenv import load_dotenv
 import httpx
 import logging
+import yfinance as yf
+import random
+import requests
+from requests.exceptions import RequestException
 
 # Configure logging
 logging.basicConfig(
@@ -80,6 +84,44 @@ class MarketStatus(BaseModel):
     timezone: str
     current_time: str
     market_hours: dict
+
+# List of proxies
+PROXY_LIST = [
+    "156.242.45.155:3129", "156.228.178.225:3129", "156.228.92.123:3129",
+    "156.253.174.108:3129", "156.228.178.194:3129", "156.228.89.18:3129",
+    "156.233.84.138:3129", "156.228.174.44:3129", "156.228.105.44:3129",
+    "154.213.202.143:3129", "156.228.89.193:3129", "156.242.40.29:3129",
+    "156.253.178.234:3129", "156.228.179.167:3129", "156.228.183.252:3129",
+    "156.233.93.177:3129", "156.228.190.204:3129", "45.201.10.218:3129",
+    "156.242.43.226:3129", "156.228.118.89:3129", "156.228.84.228:3129",
+    "156.228.92.42:3129", "156.228.96.123:3129", "156.249.138.207:3129",
+    "156.248.82.130:3129", "156.228.180.200:3129", "156.228.104.62:3129",
+    "156.249.60.201:3129", "156.228.108.154:3129", "156.228.171.165:3129",
+    "156.228.100.108:3129", "156.240.99.219:3129", "156.228.78.234:3129",
+    "156.253.172.174:3129", "156.242.45.80:3129", "154.213.166.234:3129",
+    "156.253.165.7:3129", "154.94.12.215:3129", "156.228.84.78:3129",
+    "156.253.174.129:3129", "156.233.89.145:3129", "156.228.174.210:3129",
+    "156.228.90.84:3129", "45.202.76.107:3129", "154.213.160.17:3129",
+    "154.213.161.199:3129", "156.253.172.18:3129", "156.228.79.183:3129",
+    "156.242.33.79:3129", "156.228.100.186:3129", "45.202.79.220:3129",
+    "156.228.185.208:3129", "156.228.171.177:3129", "156.248.83.9:3129",
+    "45.201.10.186:3129", "156.228.98.173:3129", "156.228.182.118:3129",
+    "154.213.202.61:3129", "156.233.89.217:3129", "156.240.99.127:3129",
+    "156.228.94.154:3129", "154.214.1.75:3129", "154.94.14.51:3129",
+    "156.248.85.63:3129", "156.249.62.97:3129", "156.253.171.99:3129",
+    "156.248.83.67:3129", "156.228.103.68:3129", "156.228.108.243:3129",
+    "156.249.56.135:3129", "156.228.84.159:3129", "156.253.168.253:3129",
+    "156.233.86.155:3129", "156.233.88.66:3129", "156.228.82.245:3129",
+    "156.228.86.144:3129", "156.228.76.220:3129", "156.242.38.49:3129",
+    "156.233.94.85:3129", "156.242.36.124:3129", "156.233.91.253:3129",
+    "156.228.84.116:3129", "156.248.87.183:3129", "156.233.89.13:3129",
+    "154.213.165.85:3129", "154.94.12.49:3129", "156.249.138.240:3129",
+    "45.202.79.159:3129", "156.233.87.46:3129", "156.253.170.209:3129",
+    "156.242.38.253:3129", "156.249.57.205:3129", "156.228.106.64:3129",
+    "156.228.99.106:3129", "156.233.84.27:3129", "156.228.176.220:3129",
+    "154.213.166.48:3129", "156.228.77.31:3129", "156.233.86.119:3129",
+    "156.253.166.62:3129"
+]
 
 @app.get("/")
 async def root():
@@ -192,6 +234,52 @@ async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str 
             status_code=500,
             detail=f"Error fetching candlestick data for {symbol}: {str(e)}"
         )
+
+@app.get("/api/test-yfinance")
+async def test_yfinance():
+    """Test endpoint to check if yfinance is working with a random proxy"""
+    proxy = random.choice(PROXY_LIST)
+    
+    logger.info(f"Testing yfinance with proxy: {proxy}")
+    
+    try:
+        # Set proxy as environment variable for yfinance to use
+        os.environ['HTTP_PROXY'] = f"http://{proxy}"
+        os.environ['HTTPS_PROXY'] = f"http://{proxy}"
+        
+        # Try to get some basic data for Apple
+        ticker = yf.Ticker("AAPL")
+        info = ticker.info
+        
+        # Clear proxy environment variables
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
+        
+        logger.info(f"Successfully got yfinance data using proxy {proxy}")
+        logger.info(f"Current price: ${info.get('currentPrice', 'N/A')}")
+        logger.info(f"Company name: {info.get('longName', 'N/A')}")
+        
+        return {
+            "status": "success",
+            "message": "Successfully accessed yfinance",
+            "proxy_used": proxy,
+            "data": {
+                "symbol": "AAPL",
+                "current_price": info.get('currentPrice', 'N/A'),
+                "company_name": info.get('longName', 'N/A')
+            }
+        }
+    except Exception as e:
+        # Clear proxy environment variables in case of error
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
+        
+        logger.error(f"Error accessing yfinance with proxy {proxy}: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Could not access yfinance: {str(e)}",
+            "proxy_used": proxy
+        }
 
 if __name__ == "__main__":
     import uvicorn
