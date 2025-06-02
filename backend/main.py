@@ -246,33 +246,67 @@ async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str 
 
 @app.get("/api/test-yfinance")
 async def test_yfinance():
-    """Test endpoint to check if yfinance is working"""
+    """Test endpoint to check if yfinance works without proxy"""
     logger.info("="*80)
-    logger.info("TESTING YFINANCE")
+    logger.info("TESTING YFINANCE DIRECTLY")
     
     try:
-        # Test yfinance directly first
-        logger.info("Testing yfinance directly...")
-        ticker = yf.Ticker("AAPL")
-        info = ticker.info
-        logger.info("Successfully got ticker info")
+        import yfinance as yf
+        logger.info("Successfully imported yfinance")
         
-        return {
-            "status": "success",
-            "message": "Successfully accessed yfinance",
-            "data": {
-                "symbol": "AAPL",
-                "current_price": info.get('currentPrice', 'N/A'),
-                "company_name": info.get('longName', 'N/A')
-            }
-        }
+        try:
+            # Try to get AAPL data
+            logger.info("Attempting to get AAPL data...")
+            ticker = yf.Ticker("AAPL")
+            logger.info("Created Ticker object")
+            
+            try:
+                info = ticker.info
+                logger.info(f"Got ticker info: {info.keys()}")
+                current_price = info.get('regularMarketPrice')
+                company_name = info.get('longName')
+                logger.info(f"Current price: {current_price}, Company name: {company_name}")
                 
+                return {
+                    "status": "success",
+                    "message": "Successfully got data from yfinance",
+                    "data": {
+                        "symbol": "AAPL",
+                        "current_price": current_price,
+                        "company_name": company_name
+                    }
+                }
+            except Exception as e:
+                logger.error(f"Error getting ticker info: {str(e)}")
+                logger.error(f"Error type: {type(e).__name__}")
+                logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
+                return {
+                    "status": "error",
+                    "message": f"Error getting ticker info: {str(e)}",
+                    "error_type": type(e).__name__,
+                    "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
+                }
+                
+        except Exception as e:
+            logger.error(f"Error creating Ticker object: {str(e)}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
+            return {
+                "status": "error",
+                "message": f"Error creating Ticker object: {str(e)}",
+                "error_type": type(e).__name__,
+                "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
+            }
+            
     except Exception as e:
-        logger.error(f"Error in yfinance test: {str(e)}")
+        logger.error(f"Error importing yfinance: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
         return {
             "status": "error",
-            "message": f"Error accessing yfinance: {str(e)}",
-            "error_type": type(e).__name__
+            "message": f"Error importing yfinance: {str(e)}",
+            "error_type": type(e).__name__,
+            "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
         }
     finally:
         logger.info("="*80)
