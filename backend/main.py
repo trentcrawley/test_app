@@ -46,7 +46,8 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
         "http://localhost:3002",
-        "https://*.vercel.app"  # Allow all Vercel deployments
+        "https://*.vercel.app",  # Allow all Vercel deployments
+        "https://test-ctowuw7l8-trents-projects-d2eec580.vercel.app"  # Your specific Vercel domain
     ],
     allow_credentials=True,
     allow_methods=["*"],
