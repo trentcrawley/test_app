@@ -26,12 +26,15 @@ interface ProxyStatus {
 interface YFinanceResult {
   status: string;
   message: string;
+  proxy_used?: string;
+  proxy_ip?: string;
+  error_type?: string;
+  error_details?: string;
   data?: {
     symbol: string;
     current_price: number | string;
     company_name: string;
   };
-  error_type?: string;
 }
 
 interface ProxyResult {
@@ -241,18 +244,31 @@ export default function Home() {
             <div className="mb-4 p-4 bg-gray-800 rounded">
               <h3 className="font-bold mb-2">Test Results:</h3>
               
-              <div className="mb-4">
+              <div className="space-y-2">
                 <h4 className="font-semibold text-green-400 mb-2">yfinance Test:</h4>
-                <div className="mb-2">
-                  <span className="font-semibold">Status:</span> {testResult.yfinance.status}
-                </div>
-                {testResult.yfinance.data && (
-                  <div className="mt-2 p-2 bg-gray-700 rounded">
-                    <pre className="whitespace-pre-wrap text-sm">
+                <div className="bg-gray-100 p-4 rounded-lg">
+                  <p className="font-medium">Status: {testResult.yfinance.status}</p>
+                  <p className="text-sm text-gray-600">{testResult.yfinance.message}</p>
+                  {testResult.yfinance.proxy_used && (
+                    <p className="text-sm text-gray-600">Proxy Used: {testResult.yfinance.proxy_used}</p>
+                  )}
+                  {testResult.yfinance.proxy_ip && (
+                    <p className="text-sm text-gray-600">Proxy IP: {testResult.yfinance.proxy_ip}</p>
+                  )}
+                  {testResult.yfinance.error_type && (
+                    <p className="text-sm text-red-600">Error Type: {testResult.yfinance.error_type}</p>
+                  )}
+                  {testResult.yfinance.error_details && (
+                    <pre className="text-sm text-red-600 whitespace-pre-wrap mt-2 bg-red-50 p-2 rounded">
+                      {testResult.yfinance.error_details}
+                    </pre>
+                  )}
+                  {testResult.yfinance.data && (
+                    <pre className="text-sm mt-2 bg-green-50 p-2 rounded">
                       {JSON.stringify(testResult.yfinance.data, null, 2)}
                     </pre>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
               
               <div>
