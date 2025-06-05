@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import pytz
@@ -8,10 +8,10 @@ import os
 from dotenv import load_dotenv
 import httpx
 import logging
-import yfinance as yf
 import random
 import requests
 from requests.exceptions import RequestException
+from requests.auth import HTTPProxyAuth
 
 # Configure logging
 logging.basicConfig(
@@ -73,7 +73,7 @@ async def log_requests(request, call_next):
     logger.info("="*80)
     return response
 
-# EODHD API base URL
+# EODHD API base URLs
 EODHD_BASE_URL = "https://eodhd.com/api"
 
 # Configure CORS
@@ -83,14 +83,14 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
         "http://localhost:3002",
-        "https://*.vercel.app",  # Allow all Vercel deployments
-        "https://test-ctowuw7l8-trents-projects-d2eec580.vercel.app",  # Previous Vercel domain
-        "https://test-app-alpha-opal.vercel.app"  # New Vercel domain
+        "https://*.vercel.app",
+        "https://test-ctowuw7l8-trents-projects-d2eec580.vercel.app",
+        "https://test-app-alpha-opal.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"]  # Explicitly expose all headers
+    expose_headers=["*"]
 )
 
 # Market hours configuration
@@ -117,13 +117,37 @@ class CandlestickData(BaseModel):
     low: List[float]
     close: List[float]
     volume: List[int]
-    data_source: str = "EODHD"  # Always EODHD now
+    data_source: str = "EODHD"
+
+class StockInfo(BaseModel):
+    symbol: str
+    name: str
+    exchange: str
+    currency: str
+    sector: Optional[str]
+    industry: Optional[str]
+    market_cap: Optional[float]
+    pe_ratio: Optional[float]
+    eps: Optional[float]
+    dividend_yield: Optional[float]
+    beta: Optional[float]
+    fifty_two_week_high: Optional[float]
+    fifty_two_week_low: Optional[float]
 
 class MarketStatus(BaseModel):
     is_open: bool
     timezone: str
     current_time: str
     market_hours: dict
+
+class NewsItem(BaseModel):
+    date: str
+    title: str
+    link: str
+    text: str
+    source: str
+    tags: List[str]
+    symbols: List[str]
 
 # ProxyScrape configuration
 PROXY_USERNAME = "4pice9axorxc0iy"
@@ -153,27 +177,21 @@ async def get_market_status():
     }
 
 @app.get("/api/stock/{symbol}/candlestick", response_model=CandlestickData)
-async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str = "1d"):
+async def get_stock_candlestick(symbol: str, exchange: str = "US"):
+    """Get 2 years of daily OHLC data for a stock"""
     logger.info("="*80)
-    logger.info(f"CANDLESTICK DATA REQUEST FOR {symbol}")
+    logger.info(f"CANDLESTICK DATA REQUEST FOR {symbol}.{exchange}")
     logger.info("="*80)
     
     try:
-        # Calculate date range
+        # Calculate date range (2 years)
         end_date = datetime.now(pytz.UTC)
-        if period == "1y":
-            start_date = end_date - timedelta(days=365)
-        elif period == "6m":
-            start_date = end_date - timedelta(days=180)
-        elif period == "1m":
-            start_date = end_date - timedelta(days=30)
-        else:
-            start_date = end_date - timedelta(days=30)  # Default to 1 month
+        start_date = end_date - timedelta(days=730)  # 2 years
         
         logger.info(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         
         # Format symbol for EODHD API
-        formatted_symbol = f"{symbol.upper()}.US"  # Always use .US for US stocks
+        formatted_symbol = f"{symbol.upper()}.{exchange.upper()}"
         url = f"{EODHD_BASE_URL}/eod/{formatted_symbol}"
         
         params = {
@@ -244,6 +262,125 @@ async def get_stock_candlestick(symbol: str, period: str = "1mo", interval: str 
             detail=f"Error fetching candlestick data for {symbol}: {str(e)}"
         )
 
+@app.get("/api/stock/{symbol}/info", response_model=StockInfo)
+async def get_stock_info(symbol: str, exchange: str = "US"):
+    """Get fundamental information for a stock"""
+    logger.info("="*80)
+    logger.info(f"STOCK INFO REQUEST FOR {symbol}.{exchange}")
+    logger.info("="*80)
+    
+    try:
+        formatted_symbol = f"{symbol.upper()}.{exchange.upper()}"
+        url = f"{EODHD_BASE_URL}/fundamentals/{formatted_symbol}"
+        
+        params = {
+            'api_token': eodhd_api_key,
+            'fmt': 'json'
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params)
+            logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Symbol {symbol} not found in EODHD API"
+                )
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Extract relevant information
+            general = data.get('General', {})
+            highlights = data.get('Highlights', {})
+            technicals = data.get('Technicals', {})
+            
+            return StockInfo(
+                symbol=symbol,
+                name=general.get('Name', ''),
+                exchange=general.get('Exchange', ''),
+                currency=general.get('Currency', ''),
+                sector=general.get('Sector', None),
+                industry=general.get('Industry', None),
+                market_cap=highlights.get('MarketCapitalization', None),
+                pe_ratio=highlights.get('PERatio', None),
+                eps=highlights.get('EarningsShare', None),
+                dividend_yield=highlights.get('DividendYield', None),
+                beta=technicals.get('Beta', None),
+                fifty_two_week_high=technicals.get('52WeekHigh', None),
+                fifty_two_week_low=technicals.get('52WeekLow', None)
+            )
+            
+    except Exception as e:
+        logger.error(f"Error fetching stock info: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching stock info for {symbol}: {str(e)}"
+        )
+
+@app.get("/api/stock/{symbol}/news", response_model=List[NewsItem])
+async def get_stock_news(symbol: str, exchange: str = "US"):
+    """Get news for a stock from the last 5 days"""
+    logger.info("="*80)
+    logger.info(f"NEWS REQUEST FOR {symbol}.{exchange}")
+    logger.info("="*80)
+    
+    try:
+        # Calculate date range (5 days)
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=5)
+        
+        formatted_symbol = f"{symbol.upper()}.{exchange.upper()}"
+        url = f"{EODHD_BASE_URL}/news"
+        
+        params = {
+            'api_token': eodhd_api_key,
+            's': formatted_symbol,
+            'from': start_date.strftime('%Y-%m-%d'),
+            'to': end_date.strftime('%Y-%m-%d'),
+            'limit': 10,
+            'offset': 0,
+            'fmt': 'json'
+        }
+        
+        logger.info(f"Making request to EODHD API: {url}")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params)
+            logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"News not found for {symbol}.{exchange}"
+                )
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Transform the news data to our format
+            news_items = []
+            for item in data:
+                news_items.append(NewsItem(
+                    date=item.get('date', ''),
+                    title=item.get('title', ''),
+                    link=item.get('link', ''),
+                    text=item.get('text', ''),
+                    source=item.get('source', ''),
+                    tags=item.get('tags', []),
+                    symbols=item.get('symbols', [])
+                ))
+            
+            return news_items
+            
+    except Exception as e:
+        logger.error(f"Error fetching news: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching news for {symbol}.{exchange}: {str(e)}"
+        )
+
 @app.get("/api/test-yfinance")
 async def test_yfinance():
     """Test endpoint to check if yfinance works with proxy"""
@@ -257,6 +394,24 @@ async def test_yfinance():
         os.environ['HTTPS_PROXY'] = PROXY_URL
         logger.info("Set proxy environment variables")
         
+        import yfinance as yf
+        import requests
+        from requests.auth import HTTPProxyAuth
+        
+        # Create a session with proxy settings
+        session = requests.Session()
+        session.proxies = {
+            'http': PROXY_URL,
+            'https': PROXY_URL
+        }
+        session.verify = False  # Disable SSL verification for proxy
+        
+        # Configure yfinance to use our session
+        import yfinance.utils
+        yfinance.utils.requests = session
+        
+        logger.info("Successfully configured yfinance with proxy")
+        
         try:
             # First verify our IP
             async with httpx.AsyncClient(
@@ -267,73 +422,62 @@ async def test_yfinance():
                 ip_response = await client.get("http://httpbin.org/ip")
                 proxy_ip = ip_response.json()["origin"]
                 logger.info(f"Proxy IP: {proxy_ip}")
-                
-                # Use the same endpoint that works in proxy test
-                yahoo_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?interval=1d&range=1d"
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                    "Accept": "application/json",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Origin": "https://finance.yahoo.com",
-                    "Referer": "https://finance.yahoo.com/quote/AAPL",
-                }
-                
-                logger.info(f"Making request to Yahoo Finance with headers: {headers}")
-                yahoo_response = await client.get(yahoo_url, headers=headers)
-                
-                if yahoo_response.status_code != 200:
-                    return {
-                        "status": "error",
-                        "message": f"Yahoo Finance returned status {yahoo_response.status_code}",
-                        "proxy_used": PROXY_HOST,
-                        "proxy_ip": proxy_ip,
-                        "error_type": "HTTPError",
-                        "error_details": str(yahoo_response.text)
-                    }
-                
-                # Parse the response
-                data = yahoo_response.json()
-                chart_data = data.get('chart', {}).get('result', [{}])[0]
-                meta = chart_data.get('meta', {})
+            
+            # Try to get AAPL data
+            logger.info("Attempting to get AAPL data...")
+            ticker = yf.Ticker("AAPL")
+            logger.info("Created Ticker object")
+            
+            try:
+                info = ticker.info
+                logger.info(f"Got ticker info: {info.keys()}")
+                current_price = info.get('regularMarketPrice')
+                company_name = info.get('longName')
+                logger.info(f"Current price: {current_price}, Company name: {company_name}")
                 
                 return {
                     "status": "success",
-                    "message": "Successfully got data from Yahoo Finance",
+                    "message": "Successfully got data from yfinance",
                     "proxy_used": PROXY_HOST,
                     "proxy_ip": proxy_ip,
                     "data": {
-                        "symbol": meta.get('symbol'),
-                        "current_price": meta.get('regularMarketPrice'),
-                        "company_name": meta.get('longName')
+                        "symbol": "AAPL",
+                        "current_price": current_price,
+                        "company_name": company_name
                     }
                 }
+            except Exception as e:
+                logger.error(f"Error getting ticker info: {str(e)}")
+                logger.error(f"Error type: {type(e).__name__}")
+                logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
+                return {
+                    "status": "error",
+                    "message": f"Error getting ticker info: {str(e)}",
+                    "proxy_used": PROXY_HOST,
+                    "proxy_ip": proxy_ip,
+                    "error_type": type(e).__name__,
+                    "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
+                }
                 
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP Error in Yahoo Finance test: {str(e)}")
-            return {
-                "status": "error",
-                "message": f"Yahoo Finance HTTP error: {str(e)}",
-                "proxy_used": PROXY_HOST,
-                "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
-                "error_type": type(e).__name__,
-                "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
-            }
         except Exception as e:
-            logger.error(f"Error in Yahoo Finance test: {str(e)}")
+            logger.error(f"Error creating Ticker object: {str(e)}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
             return {
                 "status": "error",
-                "message": f"Yahoo Finance test failed: {str(e)}",
+                "message": f"Error creating Ticker object: {str(e)}",
                 "proxy_used": PROXY_HOST,
-                "proxy_ip": proxy_ip if 'proxy_ip' in locals() else None,
                 "error_type": type(e).__name__,
                 "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
             }
             
     except Exception as e:
-        logger.error(f"Error in proxy test: {str(e)}")
+        logger.error(f"Error importing yfinance: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e.__dict__ if hasattr(e, '__dict__') else 'No details available'}")
         return {
             "status": "error",
-            "message": f"Error: {str(e)}",
+            "message": f"Error importing yfinance: {str(e)}",
             "proxy_used": PROXY_HOST,
             "error_type": type(e).__name__,
             "error_details": str(e.__dict__) if hasattr(e, '__dict__') else 'No details available'
