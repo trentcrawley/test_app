@@ -55,10 +55,11 @@ export default function Home() {
   const fetchData = async (ticker: string, exchangeCode: string) => {
     setLoading(true);
     setError(null);
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
     try {
       // Fetch candlestick data
       const candlestickResponse = await fetch(
-        `http://localhost:8000/api/stock/${ticker}/candlestick?exchange=${exchangeCode}`
+        `${API_URL}/api/stock/${ticker}/candlestick?exchange=${exchangeCode}`
       );
       if (!candlestickResponse.ok) {
         throw new Error(`Error fetching candlestick data: ${candlestickResponse.statusText}`);
@@ -68,7 +69,7 @@ export default function Home() {
 
       // Fetch stock info
       const infoResponse = await fetch(
-        `http://localhost:8000/api/stock/${ticker}/info?exchange=${exchangeCode}`
+        `${API_URL}/api/stock/${ticker}/info?exchange=${exchangeCode}`
       );
       if (!infoResponse.ok) {
         throw new Error(`Error fetching stock info: ${infoResponse.statusText}`);
@@ -78,7 +79,7 @@ export default function Home() {
 
       // Fetch news
       const newsResponse = await fetch(
-        `http://localhost:8000/api/stock/${ticker}/news?exchange=${exchangeCode}`
+        `${API_URL}/api/stock/${ticker}/news?exchange=${exchangeCode}`
       );
       if (!newsResponse.ok) {
         throw new Error(`Error fetching news: ${newsResponse.statusText}`);
