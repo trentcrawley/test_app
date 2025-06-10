@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 14% 10%;
+    --foreground: 210 40% 98%;
+    --card: 220 14% 12%;
+    --card-foreground: 210 40% 98%;
+    --popover: 220 14% 12%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217 100% 50%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 220 14% 14%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 220 14% 14%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 220 14% 14%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 60.5%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 220 13% 18%;
+    --input: 220 13% 18%;
+    --ring: 217 100% 50%;
+    --radius: 0.75rem;
+    --sidebar-background: 220 14% 10%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 217 100% 50%;
+    --sidebar-primary-foreground: 210 40% 98%;
+    --sidebar-accent: 220 14% 14%;
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 220 13% 18%;
+    --sidebar-ring: 217 100% 50%;
+  }
+
+  .light {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 217 100% 50%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222.2 84% 4.9%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222.2 84% 4.9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 217 100% 50%;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217 100% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1;
+    background: linear-gradient(135deg, #0a0e14 0%, #1a202c 100%);
+    min-height: 100vh;
+  }
+
+  /* Custom scrollbar for dark theme */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-slate-800;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-600;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-500;
+  }
+
+  /* Financial data table styling */
+  .financial-table {
+    @apply font-mono;
+  }
+
+  .financial-table th {
+    @apply text-xs uppercase tracking-wider font-semibold;
+  }
+
+  .financial-table td {
+    @apply text-sm;
+  }
+
+  /* Glow effects for important elements */
+  .glow-primary {
+    box-shadow: 0 0 20px rgba(0, 102, 255, 0.3);
+  }
+
+  .glow-secondary {
+    box-shadow: 0 0 20px rgba(0, 212, 170, 0.3);
+  }
+
+  /* Animation for loading states */
+  @keyframes shimmer {
+    0% {
+      background-position: -468px 0;
+    }
+    100% {
+      background-position: 468px 0;
+    }
+  }
+
+  .shimmer {
+    animation: shimmer 2s infinite linear;
+    background: linear-gradient(
+      to right,
+      #374151 0%,
+      #4b5563 20%,
+      #374151 40%,
+      #374151 100%
+    );
+    background-size: 800px 104px;
+  }
+
+  /* Enhance focus states for better accessibility */
+  .focus-ring {
+    @apply focus:ring-2 focus:ring-financial-primary focus:ring-offset-2 focus:ring-offset-slate-900;
+  }
+}
+
+/* Custom utilities */
+@layer utilities {
+  .text-gradient-financial {
+    @apply bg-gradient-to-r from-financial-primary to-financial-secondary bg-clip-text text-transparent;
+  }
+
+  .border-gradient-financial {
+    border-image: linear-gradient(135deg, #0066ff, #00d4aa) 1;
+  }
+
+  .backdrop-blur-financial {
+    backdrop-filter: blur(12px) saturate(180%);
+  }
+}
