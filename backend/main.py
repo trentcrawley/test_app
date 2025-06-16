@@ -149,6 +149,13 @@ class NewsItem(BaseModel):
     tags: List[str]
     symbols: List[str]
 
+class StockSymbol(BaseModel):
+    code: str
+    name: str
+    exchange: str
+    currency: str
+    type: str
+
 # ProxyScrape configuration
 PROXY_USERNAME = "4pice9axorxc0iy"
 PROXY_PASSWORD = "znhsvjczqvcgyhh"
@@ -379,6 +386,136 @@ async def get_stock_news(symbol: str, exchange: str = "US"):
         raise HTTPException(
             status_code=500,
             detail=f"Error fetching news for {symbol}.{exchange}: {str(e)}"
+        )
+
+@app.get("/api/stocks/asx", response_model=List[StockSymbol])
+async def get_asx_stocks():
+    """Get all ASX stocks from EODHD API"""
+    logger.info("="*80)
+    logger.info("ASX STOCKS REQUEST")
+    logger.info("="*80)
+    
+    try:
+        # EODHD exchange-symbol-list endpoint for ASX
+        url = f"{EODHD_BASE_URL}/exchange-symbol-list/AU"
+        
+        params = {
+            'api_token': eodhd_api_key,
+            'fmt': 'json'
+        }
+        
+        logger.info(f"Making request to EODHD API: {url}")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params)
+            logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                logger.error("404 Not Found from EODHD API")
+                raise HTTPException(
+                    status_code=404,
+                    detail="ASX exchange data not found in EODHD API"
+                )
+            
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Got {len(data) if data else 0} ASX stocks")
+            
+            if not data:
+                logger.error("No ASX stocks returned from EODHD API")
+                raise HTTPException(
+                    status_code=404,
+                    detail="No ASX stocks available"
+                )
+            
+            # Convert EODHD data to our format
+            stocks = []
+            for item in data:
+                # Only include common stocks (not ETFs, bonds, etc.)
+                if item.get('Type') == 'Common Stock':
+                    stocks.append(StockSymbol(
+                        code=item.get('Code', ''),
+                        name=item.get('Name', ''),
+                        exchange=item.get('Exchange', 'ASX'),
+                        currency=item.get('Currency', 'AUD'),
+                        type=item.get('Type', 'Common Stock')
+                    ))
+            
+            logger.info(f"Returning {len(stocks)} ASX common stocks")
+            return stocks
+            
+    except Exception as e:
+        logger.error(f"Error fetching ASX stocks: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching ASX stocks: {str(e)} (Type: {type(e).__name__})"
+        )
+
+@app.get("/api/stocks/us", response_model=List[StockSymbol])
+async def get_us_stocks():
+    """Get all US common stocks from EODHD API"""
+    logger.info("="*80)
+    logger.info("US STOCKS REQUEST")
+    logger.info("="*80)
+    
+    try:
+        # EODHD exchange-symbol-list endpoint for US
+        url = f"{EODHD_BASE_URL}/exchange-symbol-list/US"
+        
+        params = {
+            'api_token': eodhd_api_key,
+            'fmt': 'json'
+        }
+        
+        logger.info(f"Making request to EODHD API: {url}")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params)
+            logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                logger.error("404 Not Found from EODHD API")
+                raise HTTPException(
+                    status_code=404,
+                    detail="US exchange data not found in EODHD API"
+                )
+            
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Got {len(data) if data else 0} US stocks")
+            
+            if not data:
+                logger.error("No US stocks returned from EODHD API")
+                raise HTTPException(
+                    status_code=404,
+                    detail="No US stocks available"
+                )
+            
+            # Convert EODHD data to our format
+            stocks = []
+            for item in data:
+                # Only include common stocks (not ETFs, bonds, etc.)
+                if item.get('Type') == 'Common Stock':
+                    stocks.append(StockSymbol(
+                        code=item.get('Code', ''),
+                        name=item.get('Name', ''),
+                        exchange=item.get('Exchange', 'US'),
+                        currency=item.get('Currency', 'USD'),
+                        type=item.get('Type', 'Common Stock')
+                    ))
+            
+            logger.info(f"Returning {len(stocks)} US common stocks")
+            return stocks
+            
+    except Exception as e:
+        logger.error(f"Error fetching US stocks: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching US stocks: {str(e)} (Type: {type(e).__name__})"
         )
 
 @app.get("/api/test-yfinance")
