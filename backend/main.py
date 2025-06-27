@@ -12,10 +12,15 @@ import random
 import requests
 from requests.exceptions import RequestException
 from requests.auth import HTTPProxyAuth
+import asyncio
+from technical_calcs import calculate_ttm_squeeze, calculate_volume_spike, analyze_stock_technicals, calculate_ttm_squeeze_with_ema_filter
+from concurrent.futures import ThreadPoolExecutor
+import time
+import statistics
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
@@ -155,6 +160,28 @@ class StockSymbol(BaseModel):
     exchange: str
     currency: str
     type: str
+
+class StockAnalysisResult(BaseModel):
+    symbol: str
+    name: str
+    exchange: str
+    has_latest_data: bool
+    latest_date: Optional[str]
+    data_points: int
+    last_close: Optional[float]
+    last_volume: Optional[int]
+
+class HistoricalBatchRequest(BaseModel):
+    stock_codes: List[str]
+    exchange: str = "US"
+
+class StockWithMarketCap(BaseModel):
+    symbol: str
+    name: str
+    exchange: str
+    currency: str
+    type: str
+    market_cap: Optional[float]
 
 # ProxyScrape configuration
 PROXY_USERNAME = "4pice9axorxc0iy"
@@ -495,9 +522,12 @@ async def get_us_stocks():
             
             # Convert EODHD data to our format
             stocks = []
+            major_exchanges = {'NASDAQ', 'NYSE', 'AMEX', 'ARCA', 'BATS', 'IEX'}
+            
             for item in data:
-                # Only include common stocks (not ETFs, bonds, etc.)
-                if item.get('Type') == 'Common Stock':
+                # Only include common stocks on major exchanges (not ETFs, bonds, OTC, PINK, etc.)
+                if (item.get('Type') == 'Common Stock' and 
+                    item.get('Exchange') in major_exchanges):
                     stocks.append(StockSymbol(
                         code=item.get('Code', ''),
                         name=item.get('Name', ''),
@@ -506,7 +536,8 @@ async def get_us_stocks():
                         type=item.get('Type', 'Common Stock')
                     ))
             
-            logger.info(f"Returning {len(stocks)} US common stocks")
+            logger.info(f"Returning {len(stocks)} US common stocks on major exchanges")
+            print(f"✅ US: {len(stocks)}/{len(data)} stocks (major exchanges)")
             return stocks
             
     except Exception as e:
@@ -516,6 +547,341 @@ async def get_us_stocks():
         raise HTTPException(
             status_code=500,
             detail=f"Error fetching US stocks: {str(e)} (Type: {type(e).__name__})"
+        )
+
+@app.post("/api/stocks/historical-batch", response_model=List[StockAnalysisResult])
+async def get_historical_data_batch(request: HistoricalBatchRequest):
+    """Get historical data for multiple stocks and filter for those with latest trading day"""
+    logger.info("="*80)
+    logger.info(f"HISTORICAL BATCH REQUEST FOR {len(request.stock_codes)} STOCKS ON {request.exchange}")
+    logger.info("="*80)
+    
+    try:
+        # Calculate date range (2 years)
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=730)  # 2 years
+        
+        logger.info(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+        
+        # Process stocks concurrently in large batches
+        batch_size = 1000
+        all_results = []
+        
+        for i in range(0, len(request.stock_codes), batch_size):
+            batch = request.stock_codes[i:i + batch_size]
+            logger.info(f"Processing batch {i//batch_size + 1}: {len(batch)} stocks concurrently")
+            
+            # Fetch data concurrently
+            batch_data = await process_stock_batch_concurrent(
+                batch,
+                request.exchange,
+                start_date.strftime('%Y-%m-%d'),
+                end_date.strftime('%Y-%m-%d'),
+                max_concurrent=200  # High concurrency for speed
+            )
+            
+            # Apply TTM Squeeze analysis concurrently
+            squeeze_results = await analyze_ttm_squeeze_concurrent(batch_data, min_squeeze_days=1)
+            
+            # Add exchange info to results
+            for result in squeeze_results:
+                result["exchange"] = request.exchange
+                result["name"] = ""
+                all_results.append(result)
+                # Reduced logging - only log final counts
+            
+            # Minimal delay between batches
+            if i + batch_size < len(request.stock_codes):
+                logger.info("Waiting 0.05 seconds before next batch...")
+                await asyncio.sleep(0.05)
+        
+        # Find the maximum date across all stocks
+        valid_results = [r for r in all_results if r.latest_date is not None]
+        if not valid_results:
+            logger.warning("No valid data found for any stocks")
+            return []
+        
+        max_date = max(r.latest_date for r in valid_results)
+        logger.info(f"Maximum date across all stocks: {max_date}")
+        
+        # Filter for stocks with the maximum date
+        stocks_with_latest_data = [r for r in valid_results if r.latest_date == max_date]
+        
+        logger.info(f"Total stocks processed: {len(all_results)}")
+        logger.info(f"Stocks with latest data ({max_date}): {len(stocks_with_latest_data)}")
+        
+        return stocks_with_latest_data
+        
+    except Exception as e:
+        logger.error(f"Error in historical batch processing: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing historical data: {str(e)} (Type: {type(e).__name__})"
+        )
+
+@app.post("/api/stocks/ttm-squeeze", response_model=List[Dict])
+async def analyze_ttm_squeeze(request: HistoricalBatchRequest):
+    """Apply TTM Squeeze analysis to a list of stock codes"""
+    logger.info("="*80)
+    logger.info(f"TTM SQUEEZE ANALYSIS FOR {len(request.stock_codes)} STOCKS ON {request.exchange}")
+    logger.info("="*80)
+    
+    try:
+        # Calculate date range (2 years)
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=730)  # 2 years
+        
+        # Process stocks concurrently in large batches
+        batch_size = 1000
+        all_results = []
+        
+        for i in range(0, len(request.stock_codes), batch_size):
+            batch = request.stock_codes[i:i + batch_size]
+            logger.info(f"Processing batch {i//batch_size + 1}: {len(batch)} stocks concurrently")
+            
+            # Fetch data concurrently
+            batch_data = await process_stock_batch_concurrent(
+                batch,
+                request.exchange,
+                start_date.strftime('%Y-%m-%d'),
+                end_date.strftime('%Y-%m-%d'),
+                max_concurrent=200  # High concurrency for speed
+            )
+            
+            # Apply TTM Squeeze analysis concurrently
+            squeeze_results = await analyze_ttm_squeeze_concurrent(batch_data, min_squeeze_days=1)
+            
+            # Add exchange info to results
+            for result in squeeze_results:
+                result["exchange"] = request.exchange
+                result["name"] = ""
+                all_results.append(result)
+                # Reduced logging - only log final counts
+            
+            # Minimal delay between batches
+            if i + batch_size < len(request.stock_codes):
+                logger.info("Waiting 0.05 seconds before next batch...")
+                await asyncio.sleep(0.05)
+        
+        logger.info(f"TTM Squeeze analysis complete. Found {len(all_results)} stocks meeting criteria")
+        return all_results
+        
+    except Exception as e:
+        logger.error(f"Error in TTM Squeeze analysis: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error in TTM Squeeze analysis: {str(e)} (Type: {type(e).__name__})"
+        )
+
+@app.get("/api/stocks/market-scanner/{exchange}", response_model=List[Dict])
+async def market_scanner(
+    exchange: str = "US", 
+    min_turnover_us: float = 2000000,  # 2M for US stocks
+    min_turnover_au: float = 500000,   # 500K for AU stocks (lower due to smaller market)
+    min_squeeze_days: int = 5,
+    min_volume_spike_ratio_us: float = 10.0,  # 10x for US stocks
+    min_volume_spike_ratio_au: float = 5.0    # 5x for AU stocks (lower due to smaller market)
+):
+    """Market scanner that processes TTM Squeeze and Volume Spike filters simultaneously"""
+    logger.info("="*80)
+    logger.info(f"MARKET SCANNER FOR {exchange}")
+    
+    # Set turnover threshold based on exchange
+    if exchange.upper() == "US":
+        min_turnover = min_turnover_us
+        min_volume_spike_ratio = min_volume_spike_ratio_us
+        logger.info(f"Min turnover (US): ${min_turnover:,.0f}")
+        logger.info(f"Min volume spike ratio (US): {min_volume_spike_ratio}x")
+    elif exchange.upper() == "AU":
+        min_turnover = min_turnover_au
+        min_volume_spike_ratio = min_volume_spike_ratio_au
+        logger.info(f"Min turnover (AU): ${min_turnover:,.0f}")
+        logger.info(f"Min volume spike ratio (AU): {min_volume_spike_ratio}x")
+    else:
+        min_turnover = min_turnover_us  # Default to US threshold
+        min_volume_spike_ratio = min_volume_spike_ratio_us  # Default to US threshold
+        logger.info(f"Min turnover (default): ${min_turnover:,.0f}")
+        logger.info(f"Min volume spike ratio (default): {min_volume_spike_ratio}x")
+    
+    logger.info(f"Min squeeze days: {min_squeeze_days}")
+    logger.info("="*80)
+    
+    try:
+        # Step 1: Get all stocks from the exchange (already filtered for major exchanges)
+        logger.info("Step 1: Getting all stocks from exchange...")
+        if exchange.upper() == "US":
+            logger.info("Fetching US stocks...")
+            all_stocks_response = await get_us_stocks()
+        elif exchange.upper() == "AU":
+            logger.info("Fetching ASX stocks...")
+            all_stocks_response = await get_asx_stocks()
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported exchange: {exchange}")
+        
+        if not all_stocks_response:
+            logger.warning("No stocks found for exchange")
+            return []
+        
+        logger.info(f"Found {len(all_stocks_response)} stocks on {exchange}")
+        
+        stock_codes = [stock.code for stock in all_stocks_response]
+        
+        # Step 2: Fetch full historical data for ALL stocks in one go (most efficient)
+        logger.info("Step 2: Fetching full historical data for all stocks...")
+        print(f"🔄 Fetching data for {len(stock_codes)} stocks...")
+        
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=730)
+        
+        # Use maximum concurrency for speed
+        all_stock_data = await process_stock_batch_concurrent(
+            stock_codes,
+            exchange,
+            start_date.strftime('%Y-%m-%d'),
+            end_date.strftime('%Y-%m-%d'),
+            max_concurrent=400  # Higher concurrency for speed
+        )
+        
+        # Process multiple filters simultaneously using the fetched data
+        ttm_squeeze_candidates = []
+        volume_spike_candidates = []
+        
+        for data in all_stock_data:
+            if data['success'] and data['data'] and len(data['data']) > 20:  # Need enough data
+                stock_data = data['data']
+                latest_data = stock_data[-1]
+                close_price = float(latest_data['close'])
+                volume = int(latest_data['volume'])
+                volume_usd = close_price * volume
+                
+                # Check turnover filter first - applies to both TTM squeeze and volume spikes
+                if volume_usd >= min_turnover:
+                    # Add to TTM squeeze candidates
+                    ttm_squeeze_candidates.append(data)
+                    
+                    # Check for volume spikes (last 3 days vs 30-day median)
+                    if len(stock_data) >= 30:
+                        recent_volumes = [int(d['volume']) for d in stock_data[-3:]]  # Last 3 days
+                        trailing_volumes = [int(d['volume']) for d in stock_data[-30:]]  # Last 30 days
+                        
+                        # Calculate median of trailing 30 days
+                        median_volume_30d = statistics.median(trailing_volumes)
+                        
+                        # Skip stocks with zero volume or zero median volume
+                        if median_volume_30d <= 0 or all(vol == 0 for vol in recent_volumes):
+                            continue
+                        
+                        # Calculate 9 EMA
+                        closes = [float(d['close']) for d in stock_data]
+                        ema_9 = calculate_ema(closes, 9)
+                        current_price = closes[-1]
+                        
+                        # Check if ALL of the last 3 days had a volume spike AND price is above 9 EMA
+                        has_volume_spike = all(vol >= median_volume_30d * min_volume_spike_ratio for vol in recent_volumes)
+                        above_ema = current_price > ema_9
+                        
+                        if has_volume_spike and above_ema:
+                            volume_spike_candidates.append({
+                                'symbol': data['symbol'],
+                                'data': stock_data,
+                                'latest_volume_usd': volume_usd,
+                                'volume_spike_ratio': max(recent_volumes) / median_volume_30d if median_volume_30d > 0 else 0,
+                                'current_price': current_price,
+                                'ema_9': ema_9
+                            })
+        
+        logger.info(f"After simultaneous filtering:")
+        logger.info(f"  - TTM Squeeze candidates: {len(ttm_squeeze_candidates)} stocks")
+        logger.info(f"  - Volume spike candidates: {len(volume_spike_candidates)} stocks")
+        print(f"✅ Filters: {len(ttm_squeeze_candidates)} TTM, {len(volume_spike_candidates)} Volume spikes")
+        
+        if not ttm_squeeze_candidates:
+            logger.warning("No stocks passed TTM squeeze filters")
+            return []
+        
+        # Step 3: Apply TTM Squeeze analysis (CPU-bound, separated from IO)
+        logger.info(f"Step 3: Applying TTM Squeeze analysis (min {min_squeeze_days} days)...")
+        squeeze_results = await analyze_ttm_squeeze_concurrent(ttm_squeeze_candidates, min_squeeze_days)
+        
+        # Add additional info to results
+        final_results = []
+        for result in squeeze_results:
+            # Find the corresponding stock data for turnover
+            stock_data = next((s for s in ttm_squeeze_candidates if s['symbol'] == result['symbol']), None)
+            if stock_data and stock_data['data']:
+                latest_data = stock_data['data'][-1]
+                turnover = float(latest_data['close']) * int(latest_data['volume'])
+                result["exchange"] = exchange
+                result["turnover"] = turnover
+                result["name"] = ""
+                
+                # Filter out stocks with ATR/close ratio < 1%
+                atr_ratio = result.get('atr_ratio', None)
+                if atr_ratio is not None and atr_ratio < 1.0:
+                    logger.info(f"[FILTERED] {result['symbol']}: ATR ratio {atr_ratio:.2f}% < 1% threshold")
+                    continue
+                
+                final_results.append(result)
+                
+                # Enhanced logging with ATR ratio
+                atr_info = f"ATR: {atr_ratio:.2f}%" if atr_ratio is not None else "ATR: N/A"
+                logger.info(f"[PASS] {result['symbol']}: Squeeze days={result['squeeze_days']}, intensity={result['squeeze_intensity']}, turnover=${result['turnover']:,.0f}, {atr_info}")
+                
+                # Print ATR ratio for quick assessment
+                if atr_ratio is not None:
+                    if atr_ratio < 2.0:
+                        print(f"🔴 {result['symbol']}: Low volatility squeeze (ATR: {atr_ratio:.2f}%)")
+                    elif atr_ratio < 5.0:
+                        print(f"🟡 {result['symbol']}: Medium volatility squeeze (ATR: {atr_ratio:.2f}%)")
+                    else:
+                        print(f"🟢 {result['symbol']}: High volatility squeeze (ATR: {atr_ratio:.2f}%)")
+        
+        logger.info(f"TTM Squeeze analysis complete. Found {len(final_results)} stocks meeting criteria")
+        print(f"🎯 TTM Squeeze: {len(final_results)} stocks found")
+        
+        # Log volume spike results for reference
+        if volume_spike_candidates:
+            print(f"📈 Volume Spikes: {len(volume_spike_candidates)} stocks found")
+            
+            # Sort by max spike ratio and show detailed results
+            sorted_spikes = sorted(volume_spike_candidates, key=lambda x: x['volume_spike_ratio'], reverse=True)
+            
+            for spike in sorted_spikes:
+                symbol = spike['symbol']
+                current_price = spike['current_price']
+                ema_9 = spike['ema_9']
+                
+                # Calculate spike ratios for display
+                stock_data = spike['data']
+                recent_volumes = [int(d['volume']) for d in stock_data[-3:]]
+                trailing_volumes = [int(d['volume']) for d in stock_data[-30:]]
+                median_volume_30d = statistics.median(trailing_volumes)
+                
+                # Prevent division by zero
+                if median_volume_30d > 0:
+                    spike_ratios = [round(vol / median_volume_30d, 1) for vol in recent_volumes]
+                    ratios_str = f"{spike_ratios[0]}x, {spike_ratios[1]}x, {spike_ratios[2]}x"
+                else:
+                    ratios_str = "N/A (zero volume)"
+                
+                print(f"  {symbol}: ${current_price:.2f} | {ratios_str} | Max: {spike['volume_spike_ratio']:.1f}x | EMA9: ${ema_9:.2f}")
+        else:
+            print("📈 Volume Spikes: 0 stocks found")
+        
+        logger.info("="*80)
+        return final_results
+        
+    except Exception as e:
+        logger.error(f"Error in TTM Squeeze analysis: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error in TTM Squeeze analysis: {str(e)} (Type: {type(e).__name__})"
         )
 
 @app.get("/api/test-yfinance")
@@ -885,6 +1251,805 @@ async def test_proxy_ip():
         os.environ.pop('HTTP_PROXY', None)
         os.environ.pop('HTTPS_PROXY', None)
         logger.info("="*80)
+
+@app.post("/api/stocks/ema-stacking", response_model=List[Dict])
+async def analyze_ema_stacking(request: HistoricalBatchRequest):
+    """Check EMA stacking (9EMA > 50EMA > 200EMA) for a list of stock codes"""
+    logger.info("="*80)
+    logger.info(f"EMA STACKING ANALYSIS FOR {len(request.stock_codes)} STOCKS ON {request.exchange}")
+    logger.info("="*80)
+    
+    try:
+        # Calculate date range (2 years)
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=730)  # 2 years
+        
+        # Process stocks concurrently in large batches
+        batch_size = 500
+        all_results = []
+        
+        for i in range(0, len(request.stock_codes), batch_size):
+            batch = request.stock_codes[i:i + batch_size]
+            logger.info(f"Processing batch {i//batch_size + 1}: {len(batch)} stocks concurrently")
+            
+            # Fetch data concurrently
+            batch_data = await process_stock_batch_concurrent(
+                batch,
+                request.exchange,
+                start_date.strftime('%Y-%m-%d'),
+                end_date.strftime('%Y-%m-%d'),
+                max_concurrent=50
+            )
+            
+            # Analyze EMA stacking concurrently
+            def analyze_ema_single_stock(stock_data: Dict) -> Optional[Dict]:
+                try:
+                    if not stock_data['success'] or not stock_data['data']:
+                        return None
+                    
+                    symbol = stock_data['symbol']
+                    data = stock_data['data']
+                    
+                    # Import the EMA function
+                    from technical_calcs import calculate_emas_and_check_stacking
+                    ema_result = calculate_emas_and_check_stacking(data)
+                    
+                    if ema_result:
+                        ema_result["symbol"] = symbol
+                        ema_result["exchange"] = request.exchange
+                        return ema_result
+                    
+                    return None
+                    
+                except Exception as e:
+                    logger.error(f"Error analyzing EMA for {stock_data.get('symbol', 'unknown')}: {str(e)}")
+                    return None
+            
+            # Use ThreadPoolExecutor for CPU-intensive analysis
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                loop = asyncio.get_event_loop()
+                tasks = [
+                    loop.run_in_executor(executor, analyze_ema_single_stock, stock_data)
+                    for stock_data in batch_data
+                ]
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Filter out None results and exceptions
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Analysis exception: {result}")
+                elif result is not None:
+                    all_results.append(result)
+                    # Removed verbose individual stock logging - only log final counts
+            
+            # Minimal delay between batches
+            if i + batch_size < len(request.stock_codes):
+                logger.info("Waiting 0.1 seconds before next batch...")
+                await asyncio.sleep(0.1)
+        
+        stacked_stocks = [r for r in all_results if r['stacked']]
+        logger.info(f"EMA stacking analysis complete. Found {len(stacked_stocks)} stocks with properly stacked EMAs out of {len(all_results)} total")
+        return all_results
+        
+    except Exception as e:
+        logger.error(f"Error in EMA stacking analysis: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error in EMA stacking analysis: {str(e)} (Type: {type(e).__name__})"
+        )
+
+# Add these new concurrent processing functions after the existing helper functions
+
+async def fetch_stock_data_concurrent(symbol: str, exchange: str, start_date: str, end_date: str) -> Dict:
+    """Fetch data for a single stock concurrently"""
+    try:
+        formatted_symbol = f"{symbol.upper()}.{exchange.upper()}"
+        url = f"{EODHD_BASE_URL}/eod/{formatted_symbol}"
+        
+        params = {
+            'api_token': eodhd_api_key,
+            'from': start_date,
+            'to': end_date,
+            'fmt': 'json',
+            'period': 'd',
+            'order': 'a'
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            
+            if response.status_code == 404:
+                return {
+                    'symbol': symbol,
+                    'success': False,
+                    'error': 'No data found',
+                    'data': None
+                }
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data:
+                return {
+                    'symbol': symbol,
+                    'success': False,
+                    'error': 'Empty data',
+                    'data': None
+                }
+            
+            return {
+                'symbol': symbol,
+                'success': True,
+                'error': None,
+                'data': data
+            }
+            
+    except Exception as e:
+        return {
+            'symbol': symbol,
+            'success': False,
+            'error': str(e),
+            'data': None
+        }
+
+async def process_stock_batch_concurrent(stock_codes: List[str], exchange: str, start_date: str, end_date: str, max_concurrent: int = 400) -> List[Dict]:
+    """Process a batch of stocks concurrently with high concurrency for speed"""
+    logger.info(f"Processing {len(stock_codes)} stocks concurrently (max {max_concurrent} at once)")
+    
+    # Create semaphore to limit concurrent requests
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    async def fetch_with_semaphore(symbol: str) -> Dict:
+        async with semaphore:
+            try:
+                # Minimal delay to respect rate limit (1000/minute = ~16.7/second)
+                # Reduced delay for faster processing while staying within limits
+                await asyncio.sleep(0.003)  # 3ms delay for maximum speed
+                result = await fetch_stock_data_concurrent(symbol, exchange, start_date, end_date)
+                if result['success']:
+                    # Reduced logging - only log warnings and final counts
+                    pass  # Commented out individual stock logging
+                else:
+                    logger.debug(f"{symbol}: {result['error']}")
+                return result
+            except Exception as e:
+                logger.error(f"Error fetching {symbol}: {str(e)}")
+                return {
+                    'symbol': symbol,
+                    'success': False,
+                    'error': str(e),
+                    'data': None
+                }
+    
+    # Process all stocks concurrently
+    tasks = [fetch_with_semaphore(symbol) for symbol in stock_codes]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Filter out exceptions and return valid results
+    valid_results = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Task exception: {result}")
+        else:
+            valid_results.append(result)
+    
+    logger.info(f"Concurrent batch complete: {len(valid_results)} results")
+    return valid_results
+
+async def analyze_ttm_squeeze_concurrent(stock_data_list: List[Dict], min_squeeze_days: int = 5) -> List[Dict]:
+    """Apply TTM Squeeze analysis to multiple stocks concurrently"""
+    logger.info(f"Applying TTM Squeeze analysis to {len(stock_data_list)} stocks concurrently")
+    
+    def analyze_single_stock(stock_data: Dict) -> Optional[Dict]:
+        """Analyze a single stock (runs in thread pool)"""
+        try:
+            if not stock_data['success'] or not stock_data['data']:
+                return None
+            
+            symbol = stock_data['symbol']
+            data = stock_data['data']
+            
+            # Apply TTM Squeeze analysis with EMA filter
+            squeeze_result = calculate_ttm_squeeze_with_ema_filter(symbol, data)
+            
+            if squeeze_result and squeeze_result['squeeze_days'] >= min_squeeze_days:
+                # Reduced logging - only log final counts
+                return squeeze_result
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error analyzing {stock_data.get('symbol', 'unknown')}: {str(e)}")
+            return None
+    
+    # Use ThreadPoolExecutor for CPU-intensive analysis
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        loop = asyncio.get_event_loop()
+        tasks = [
+            loop.run_in_executor(executor, analyze_single_stock, stock_data)
+            for stock_data in stock_data_list
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Filter out None results and exceptions
+    valid_results = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Analysis exception: {result}")
+        elif result is not None:
+            valid_results.append(result)
+    
+    logger.info(f"TTM Squeeze analysis complete: {len(valid_results)} stocks meet criteria")
+    return valid_results
+
+async def fetch_latest_data_concurrent(symbol: str, exchange: str) -> Dict:
+    """Fetch only the latest data point for turnover calculation (much faster)"""
+    try:
+        formatted_symbol = f"{symbol.upper()}.{exchange.upper()}"
+        url = f"{EODHD_BASE_URL}/eod/{formatted_symbol}"
+        
+        # Get only the last 5 days to ensure we have the latest data
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=5)
+        
+        params = {
+            'api_token': eodhd_api_key,
+            'from': start_date.strftime('%Y-%m-%d'),
+            'to': end_date.strftime('%Y-%m-%d'),
+            'fmt': 'json',
+            'period': 'd',
+            'order': 'a'
+        }
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, params=params)
+            
+            if response.status_code == 404:
+                return {
+                    'symbol': symbol,
+                    'success': False,
+                    'error': 'No data found',
+                    'data': None
+                }
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data:
+                return {
+                    'symbol': symbol,
+                    'success': False,
+                    'error': 'Empty data',
+                    'data': None
+                }
+            
+            # Return only the latest data point
+            latest = data[-1]
+            return {
+                'symbol': symbol,
+                'success': True,
+                'error': None,
+                'data': latest
+            }
+            
+    except Exception as e:
+        return {
+            'symbol': symbol,
+            'success': False,
+            'error': str(e),
+            'data': None
+        }
+
+async def filter_by_turnover_fast(stock_codes: List[str], exchange: str, min_turnover: float, max_concurrent: int = 200) -> List[str]:
+    """Fast turnover filtering using only latest data points"""
+    logger.info(f"Fast turnover filtering for {len(stock_codes)} stocks (min ${min_turnover:,.0f})")
+    print(f"🔄 Starting turnover filtering: {len(stock_codes)} stocks to process...")
+    
+    # Create semaphore to limit concurrent requests
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    # Track progress
+    processed_count = 0
+    valid_symbols = []
+    
+    async def fetch_with_semaphore(symbol: str) -> Optional[str]:
+        nonlocal processed_count
+        async with semaphore:
+            try:
+                # Minimal delay for speed
+                await asyncio.sleep(0.01)
+                result = await fetch_latest_data_concurrent(symbol, exchange)
+                
+                processed_count += 1
+                
+                # Progress update every 500 stocks
+                if processed_count % 500 == 0:
+                    print(f"📊 Turnover progress: {processed_count}/{len(stock_codes)} stocks processed ({processed_count/len(stock_codes)*100:.1f}%)")
+                
+                if result['success'] and result['data']:
+                    latest = result['data']
+                    close_price = float(latest['close'])
+                    volume = int(latest['volume'])
+                    turnover = close_price * volume
+                    
+                    if turnover >= min_turnover:
+                        # Reduced logging - only log final counts
+                        return symbol
+                    else:
+                        return None
+                else:
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error fetching {symbol}: {str(e)}")
+                return None
+    
+    # Process all stocks concurrently
+    tasks = [fetch_with_semaphore(symbol) for symbol in stock_codes]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Filter out None results and exceptions
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Task exception: {result}")
+        elif result is not None:
+            valid_symbols.append(result)
+    
+    logger.info(f"Turnover filter complete: {len(valid_symbols)} stocks passed out of {len(stock_codes)}")
+    print(f"✅ Turnover filter: {len(valid_symbols)} stocks traded over ${min_turnover:,.0f} out of {len(stock_codes)} stocks")
+    return valid_symbols
+
+async def fetch_market_cap_concurrent(symbol: str, exchange: str) -> Dict:
+    """Fetch market cap for a single stock"""
+    try:
+        formatted_symbol = f"{symbol.upper()}.{exchange.upper()}"
+        url = f"{EODHD_BASE_URL}/fundamentals/{formatted_symbol}"
+        
+        params = {
+            'api_token': eodhd_api_key,
+            'fmt': 'json'
+        }
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, params=params)
+            
+            if response.status_code == 404:
+                return {
+                    'symbol': symbol,
+                    'success': False,
+                    'error': 'No data found',
+                    'market_cap': None
+                }
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Extract market cap from fundamentals
+            highlights = data.get('Highlights', {})
+            market_cap = highlights.get('MarketCapitalization')
+            
+            return {
+                'symbol': symbol,
+                'success': True,
+                'error': None,
+                'market_cap': market_cap
+            }
+            
+    except Exception as e:
+        return {
+            'symbol': symbol,
+            'success': False,
+            'error': str(e),
+            'market_cap': None
+        }
+
+async def filter_stocks_by_market_cap(stock_codes: List[str], exchange: str, min_market_cap: float, max_concurrent: int = 100) -> List[str]:
+    """Filter stocks by minimum market cap using concurrent requests"""
+    logger.info(f"Filtering {len(stock_codes)} stocks by market cap (min ${min_market_cap:,.0f})")
+    print(f"🔄 Starting market cap filtering: {len(stock_codes)} stocks to process...")
+    
+    # Create semaphore to limit concurrent requests
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    # Track progress
+    processed_count = 0
+    valid_symbols = []
+    
+    async def fetch_with_semaphore(symbol: str) -> Optional[str]:
+        nonlocal processed_count, valid_symbols
+        async with semaphore:
+            try:
+                # Minimal delay for rate limiting
+                await asyncio.sleep(0.02)
+                result = await fetch_market_cap_concurrent(symbol, exchange)
+                
+                processed_count += 1
+                
+                # Progress update every 1000 stocks
+                if processed_count % 1000 == 0:
+                    print(f"📊 Market cap progress: {processed_count}/{len(stock_codes)} stocks processed ({processed_count/len(stock_codes)*100:.1f}%)")
+                
+                if result['success'] and result['market_cap']:
+                    market_cap = result['market_cap']
+                    if market_cap >= min_market_cap:
+                        return symbol
+                    else:
+                        return None
+                else:
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error fetching market cap for {symbol}: {str(e)}")
+                return None
+    
+    # Process all stocks concurrently
+    tasks = [fetch_with_semaphore(symbol) for symbol in stock_codes]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Filter out None results and exceptions
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Task exception: {result}")
+        elif result is not None:
+            valid_symbols.append(result)
+    
+    logger.info(f"Market cap filter complete: {len(valid_symbols)} stocks passed out of {len(stock_codes)}")
+    print(f"✅ Market cap filter: {len(valid_symbols)} stocks satisfied the ${min_market_cap:,.0f} constraint out of {len(stock_codes)} total stocks")
+    return valid_symbols
+
+@app.get("/api/stocks/with-market-cap/{exchange}", response_model=List[StockWithMarketCap])
+async def get_stocks_with_market_cap(
+    exchange: str = "US",
+    min_market_cap: float = 500000000  # 500M default
+):
+    """Get all stocks from exchange with market cap data and filter by minimum market cap"""
+    logger.info("="*80)
+    logger.info(f"STOCKS WITH MARKET CAP REQUEST FOR {exchange}")
+    logger.info(f"Min market cap: ${min_market_cap:,.0f}")
+    logger.info("="*80)
+    
+    try:
+        # Step 1: Get all common stocks from the exchange
+        if exchange.upper() == "US":
+            all_stocks_response = await get_us_stocks()
+        elif exchange.upper() == "AU":
+            all_stocks_response = await get_asx_stocks()
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported exchange: {exchange}")
+        
+        if not all_stocks_response:
+            logger.warning("No stocks found for exchange")
+            return []
+        
+        logger.info(f"Found {len(all_stocks_response)} common stocks on {exchange}")
+        
+        # Step 2: Filter by market cap
+        stock_codes = [stock.code for stock in all_stocks_response]
+        stocks_with_market_cap = await filter_stocks_by_market_cap(
+            stock_codes, 
+            exchange, 
+            min_market_cap, 
+            max_concurrent=100
+        )
+        
+        logger.info(f"After market cap filter: {len(stocks_with_market_cap)} stocks (min ${min_market_cap:,.0f})")
+        
+        if not stocks_with_market_cap:
+            logger.warning("No stocks passed market cap filter")
+            return []
+        
+        # Step 3: Create response with market cap data
+        result_stocks = []
+        for stock in all_stocks_response:
+            if stock.code in stocks_with_market_cap:
+                # Fetch market cap for this stock
+                market_cap_data = await fetch_market_cap_concurrent(stock.code, exchange)
+                market_cap = market_cap_data.get('market_cap') if market_cap_data['success'] else None
+                
+                result_stocks.append(StockWithMarketCap(
+                    symbol=stock.code,
+                    name=stock.name,
+                    exchange=stock.exchange,
+                    currency=stock.currency,
+                    type=stock.type,
+                    market_cap=market_cap
+                ))
+        
+        logger.info(f"Returning {len(result_stocks)} stocks with market cap data")
+        return result_stocks
+        
+    except Exception as e:
+        logger.error(f"Error in market cap filtering: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error in market cap filtering: {str(e)} (Type: {type(e).__name__})"
+        )
+
+async def filter_by_volume_fast(stock_codes: List[str], exchange: str, min_volume_usd: float, max_concurrent: int = 200) -> List[str]:
+    """Fast volume filtering using only latest data points"""
+    logger.info(f"Fast volume filtering for {len(stock_codes)} stocks (min ${min_volume_usd:,.0f} traded)")
+    print(f"🔄 Starting volume filtering: {len(stock_codes)} stocks to process...")
+    
+    # Create semaphore to limit concurrent requests
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    # Track progress
+    processed_count = 0
+    
+    async def fetch_with_semaphore(symbol: str) -> Optional[str]:
+        nonlocal processed_count
+        async with semaphore:
+            try:
+                # Minimal delay for speed
+                await asyncio.sleep(0.01)
+                result = await fetch_latest_data_concurrent(symbol, exchange)
+                
+                processed_count += 1
+                
+                # Progress update every 500 stocks
+                if processed_count % 500 == 0:
+                    print(f"📊 Volume progress: {processed_count}/{len(stock_codes)} stocks processed ({processed_count/len(stock_codes)*100:.1f}%)")
+                
+                if result['success'] and result['data']:
+                    latest = result['data']
+                    close_price = float(latest['close'])
+                    volume = int(latest['volume'])
+                    volume_usd = close_price * volume
+                    
+                    if volume_usd >= min_volume_usd:
+                        # Reduced logging - only log final counts
+                        return symbol
+                    else:
+                        return None
+                else:
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error fetching {symbol}: {str(e)}")
+                return None
+    
+    # Process all stocks concurrently
+    tasks = [fetch_with_semaphore(symbol) for symbol in stock_codes]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Filter out None results and exceptions
+    valid_symbols = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Task exception: {result}")
+        elif result is not None:
+            valid_symbols.append(result)
+    
+    logger.info(f"Volume filter complete: {len(valid_symbols)} stocks passed out of {len(stock_codes)}")
+    print(f"✅ Volume filter: {len(valid_symbols)} stocks traded over ${min_volume_usd:,.0f} out of {len(stock_codes)} stocks")
+    return valid_symbols
+
+def calculate_ema(prices: List[float], period: int) -> float:
+    """Calculate Exponential Moving Average"""
+    if len(prices) < period:
+        return prices[-1] if prices else 0
+    
+    multiplier = 2 / (period + 1)
+    ema = prices[0]
+    
+    for price in prices[1:]:
+        ema = (price * multiplier) + (ema * (1 - multiplier))
+    
+    return ema
+
+@app.get("/api/stocks/market-scanner-fast/{exchange}", response_model=List[Dict])
+async def market_scanner_fast(
+    exchange: str = "US", 
+    min_turnover_us: float = 2000000,  # 2M for US stocks
+    min_turnover_au: float = 500000,   # 500K for AU stocks (lower due to smaller market)
+    min_squeeze_days: int = 5,
+    min_volume_spike_ratio_us: float = 10.0,  # 10x for US stocks
+    min_volume_spike_ratio_au: float = 5.0    # 5x for AU stocks (lower due to smaller market)
+):
+    """Fast market scanner that minimizes API calls by using efficient filtering"""
+    logger.info("="*80)
+    logger.info(f"FAST MARKET SCANNER FOR {exchange}")
+    
+    # Set turnover threshold based on exchange
+    if exchange.upper() == "US":
+        min_turnover = min_turnover_us
+        min_volume_spike_ratio = min_volume_spike_ratio_us
+        logger.info(f"Min turnover (US): ${min_turnover:,.0f}")
+        logger.info(f"Min volume spike ratio (US): {min_volume_spike_ratio}x")
+    elif exchange.upper() == "AU":
+        min_turnover = min_turnover_au
+        min_volume_spike_ratio = min_volume_spike_ratio_au
+        logger.info(f"Min turnover (AU): ${min_turnover:,.0f}")
+        logger.info(f"Min volume spike ratio (AU): {min_volume_spike_ratio}x")
+    else:
+        min_turnover = min_turnover_us  # Default to US threshold
+        min_volume_spike_ratio = min_volume_spike_ratio_us  # Default to US threshold
+        logger.info(f"Min turnover (default): ${min_turnover:,.0f}")
+        logger.info(f"Min volume spike ratio (default): {min_volume_spike_ratio}x")
+    
+    logger.info(f"Min squeeze days: {min_squeeze_days}")
+    logger.info("="*80)
+    
+    try:
+        # Step 1: Get all stocks from the exchange
+        logger.info("Step 1: Getting all stocks from exchange...")
+        if exchange.upper() == "US":
+            logger.info("Fetching US stocks...")
+            all_stocks_response = await get_us_stocks()
+        elif exchange.upper() == "AU":
+            logger.info("Fetching ASX stocks...")
+            all_stocks_response = await get_asx_stocks()
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported exchange: {exchange}")
+        
+        if not all_stocks_response:
+            logger.warning("No stocks found for exchange")
+            return []
+        
+        logger.info(f"Found {len(all_stocks_response)} common stocks on {exchange}")
+        
+        stock_codes = [stock.code for stock in all_stocks_response]
+        
+        # Step 2: Fetch full historical data for ALL stocks in one go (most efficient)
+        logger.info("Step 2: Fetching full historical data for all stocks...")
+        print(f"🔄 Fetching data for {len(stock_codes)} stocks...")
+        
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=730)
+        
+        # Use maximum concurrency for speed
+        all_stock_data = await process_stock_batch_concurrent(
+            stock_codes,
+            exchange,
+            start_date.strftime('%Y-%m-%d'),
+            end_date.strftime('%Y-%m-%d'),
+            max_concurrent=400  # Higher concurrency for speed
+        )
+        
+        # Step 3: Process all filters simultaneously in memory (no additional API calls)
+        logger.info("Step 3: Processing filters simultaneously...")
+        ttm_squeeze_candidates = []
+        volume_spike_candidates = []
+        
+        for data in all_stock_data:
+            if data['success'] and data['data'] and len(data['data']) > 20:
+                stock_data = data['data']
+                latest_data = stock_data[-1]
+                close_price = float(latest_data['close'])
+                volume = int(latest_data['volume'])
+                volume_usd = close_price * volume
+                
+                # Check turnover filter first - applies to both TTM squeeze and volume spikes
+                if volume_usd >= min_turnover:
+                    # Add to TTM squeeze candidates
+                    ttm_squeeze_candidates.append(data)
+                    
+                    # Check for volume spikes (only if we have enough data)
+                    if len(stock_data) >= 30:
+                        recent_volumes = [int(d['volume']) for d in stock_data[-3:]]
+                        trailing_volumes = [int(d['volume']) for d in stock_data[-30:]]
+                        
+                        # Calculate median of trailing 30 days
+                        median_volume_30d = statistics.median(trailing_volumes)
+                        
+                        # Skip stocks with zero volume or zero median volume
+                        if median_volume_30d <= 0 or all(vol == 0 for vol in recent_volumes):
+                            continue
+                        
+                        # Calculate 9 EMA
+                        closes = [float(d['close']) for d in stock_data]
+                        ema_9 = calculate_ema(closes, 9)
+                        current_price = closes[-1]
+                        
+                        # Check volume spike criteria
+                        has_volume_spike = all(vol >= median_volume_30d * min_volume_spike_ratio for vol in recent_volumes)
+                        above_ema = current_price > ema_9
+                        
+                        if has_volume_spike and above_ema:
+                            volume_spike_candidates.append({
+                                'symbol': data['symbol'],
+                                'data': stock_data,
+                                'latest_volume_usd': volume_usd,
+                                'volume_spike_ratio': max(recent_volumes) / median_volume_30d if median_volume_30d > 0 else 0,
+                                'current_price': current_price,
+                                'ema_9': ema_9
+                            })
+        
+        logger.info(f"After filtering:")
+        logger.info(f"  - TTM Squeeze candidates: {len(ttm_squeeze_candidates)} stocks")
+        logger.info(f"  - Volume spike candidates: {len(volume_spike_candidates)} stocks")
+        print(f"✅ Filters: {len(ttm_squeeze_candidates)} TTM, {len(volume_spike_candidates)} Volume spikes")
+        
+        if not ttm_squeeze_candidates:
+            logger.warning("No stocks passed TTM squeeze filters")
+            return []
+        
+        # Step 4: Apply TTM Squeeze analysis with maximum CPU utilization
+        logger.info(f"Step 4: Applying TTM Squeeze analysis (min {min_squeeze_days} days)...")
+        squeeze_results = await analyze_ttm_squeeze_concurrent(ttm_squeeze_candidates, min_squeeze_days)
+        
+        # Add additional info to results
+        final_results = []
+        for result in squeeze_results:
+            # Find the corresponding stock data for turnover
+            stock_data = next((s for s in ttm_squeeze_candidates if s['symbol'] == result['symbol']), None)
+            if stock_data and stock_data['data']:
+                latest_data = stock_data['data'][-1]
+                turnover = float(latest_data['close']) * int(latest_data['volume'])
+                result["exchange"] = exchange
+                result["turnover"] = turnover
+                result["name"] = ""
+                
+                # Filter out stocks with ATR/close ratio < 1%
+                atr_ratio = result.get('atr_ratio', None)
+                if atr_ratio is not None and atr_ratio < 1.0:
+                    logger.info(f"[FILTERED] {result['symbol']}: ATR ratio {atr_ratio:.2f}% < 1% threshold")
+                    continue
+                
+                final_results.append(result)
+                
+                # Enhanced logging with ATR ratio
+                atr_info = f"ATR: {atr_ratio:.2f}%" if atr_ratio is not None else "ATR: N/A"
+                logger.info(f"[PASS] {result['symbol']}: Squeeze days={result['squeeze_days']}, intensity={result['squeeze_intensity']}, turnover=${result['turnover']:,.0f}, {atr_info}")
+                
+                # Print ATR ratio for quick assessment
+                if atr_ratio is not None:
+                    if atr_ratio < 2.0:
+                        print(f"🔴 {result['symbol']}: Low volatility squeeze (ATR: {atr_ratio:.2f}%)")
+                    elif atr_ratio < 5.0:
+                        print(f"🟡 {result['symbol']}: Medium volatility squeeze (ATR: {atr_ratio:.2f}%)")
+                    else:
+                        print(f"🟢 {result['symbol']}: High volatility squeeze (ATR: {atr_ratio:.2f}%)")
+        
+        logger.info(f"TTM Squeeze analysis complete. Found {len(final_results)} stocks meeting criteria")
+        print(f"🎯 TTM Squeeze: {len(final_results)} stocks found")
+        
+        # Log volume spike results for reference
+        if volume_spike_candidates:
+            print(f"📈 Volume Spikes: {len(volume_spike_candidates)} stocks found")
+            
+            # Sort by max spike ratio and show detailed results
+            sorted_spikes = sorted(volume_spike_candidates, key=lambda x: x['volume_spike_ratio'], reverse=True)
+            
+            for spike in sorted_spikes:
+                symbol = spike['symbol']
+                current_price = spike['current_price']
+                ema_9 = spike['ema_9']
+                
+                # Calculate spike ratios for display
+                stock_data = spike['data']
+                recent_volumes = [int(d['volume']) for d in stock_data[-3:]]
+                trailing_volumes = [int(d['volume']) for d in stock_data[-30:]]
+                median_volume_30d = statistics.median(trailing_volumes)
+                
+                # Prevent division by zero
+                if median_volume_30d > 0:
+                    spike_ratios = [round(vol / median_volume_30d, 1) for vol in recent_volumes]
+                    ratios_str = f"{spike_ratios[0]}x, {spike_ratios[1]}x, {spike_ratios[2]}x"
+                else:
+                    ratios_str = "N/A (zero volume)"
+                
+                print(f"  {symbol}: ${current_price:.2f} | {ratios_str} | Max: {spike['volume_spike_ratio']:.1f}x | EMA9: ${ema_9:.2f}")
+        else:
+            print("📈 Volume Spikes: 0 stocks found")
+        
+        logger.info("="*80)
+        return final_results
+        
+    except Exception as e:
+        logger.error(f"Error in fast market scanner: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error details: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error in fast market scanner: {str(e)} (Type: {type(e).__name__})"
+        )
 
 if __name__ == "__main__":
     import uvicorn
