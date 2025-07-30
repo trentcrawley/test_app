@@ -95,3 +95,56 @@ export const useSavedStocks = () => {
     staleTime: 5 * 60 * 1000, // 5 minutes
   });
 };
+
+export interface ScanParameters {
+  min_turnover_us?: number;
+  min_turnover_au?: number;
+  min_squeeze_days?: number;
+  min_volume_spike_ratio_us?: number;
+  min_volume_spike_ratio_au?: number;
+}
+
+export const useTriggerMarketScan = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ country, params, signal }: { country: "US" | "AU"; params?: ScanParameters; signal?: AbortSignal }) => {
+      const baseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+      const queryParams = new URLSearchParams();
+      
+      if (params) {
+        Object.entries(params).forEach(([key, value]) => {
+          if (value !== undefined) {
+            queryParams.append(key, value.toString());
+          }
+        });
+      }
+      
+      const url = `${baseUrl}/api/market-scanner/run/${country}${queryParams.toString() ? `?${queryParams.toString()}` : ''}`;
+      const response = await fetch(url, { 
+        signal,
+        method: 'GET'
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to trigger ${country} scan: ${response.statusText}`);
+      }
+      return response.json();
+    },
+    onSuccess: (data, { country }) => {
+      // Invalidate the stock analysis query to refresh data
+      queryClient.invalidateQueries({ queryKey: ["stock-analysis"] });
+      toast({
+        title: "Scan Completed",
+        description: `${country} market scan completed successfully. Found ${data.ttm_squeeze_count || 0} TTM squeeze signals and ${data.volume_spike_count || 0} volume spikes.`,
+      });
+    },
+    onError: (error: Error, { country }) => {
+      toast({
+        title: "Scan Failed",
+        description: `Failed to complete ${country} market scan: ${error.message}`,
+        variant: "destructive",
+      });
+    },
+  });
+};

@@ -1,12 +1,12 @@
 import { useState } from "react";
 import {
   useStockAnalysis,
-  useRefreshStockData,
   useSavedStocks,
 } from "@/hooks/useStocks";
 import { TTMSqueezeTable } from "@/components/TTMSqueezeTable";
 import { VolumeSpikeTable } from "@/components/VolumeSpikeTable";
 import { CountrySelector } from "@/components/CountrySelector";
+import { ScanControls } from "@/components/ScanControls";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -18,7 +18,6 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  RefreshCw,
   TrendingUp,
   Volume2,
   Bookmark,
@@ -36,13 +35,14 @@ export function StockDashboard() {
     data: stockAnalysis,
     isLoading,
     error,
-  } = useStockAnalysis({ country: selectedCountry });
+  } = useStockAnalysis({ 
+    country: selectedCountry,
+    exchanges: [],
+    sectors: []
+  });
   const { data: savedStocks, isLoading: savedStocksLoading } = useSavedStocks();
-  const refreshData = useRefreshStockData();
 
-  const handleRefresh = () => {
-    refreshData.mutate();
-  };
+
 
   const stats = [
     {
@@ -110,16 +110,7 @@ export function StockDashboard() {
                 </div>
               )}
 
-              <Button
-                onClick={handleRefresh}
-                disabled={refreshData.isPending || isLoading}
-                className="bg-financial-primary hover:bg-financial-primary/80"
-              >
-                <RefreshCw
-                  className={`h-4 w-4 mr-2 ${refreshData.isPending ? "animate-spin" : ""}`}
-                />
-                Refresh Data
-              </Button>
+              <ScanControls />
             </div>
           </div>
         </div>

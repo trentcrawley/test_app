@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytz
 import os
 from dotenv import load_dotenv
@@ -17,6 +17,12 @@ from technical_calcs import calculate_ttm_squeeze, calculate_volume_spike, analy
 from concurrent.futures import ThreadPoolExecutor
 import time
 import statistics
+from scheduler import scheduler
+from database import create_tables
+from database_service import DatabaseService
+
+# Initialize database tables
+create_tables()
 
 # Configure logging
 logging.basicConfig(
@@ -33,8 +39,11 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+# Global variable to track running scans
+running_scans = set()
+
 # Check if API key is available
-eodhd_api_key = os.getenv("EODHD_API_KEY")
+eodhd_api_key = os.getenv("EODHD_API_KEY", "").strip()
 proxy_username = os.getenv("PROXY_USERNAME")
 proxy_password = os.getenv("PROXY_PASSWORD")
 proxy_host = os.getenv("PROXY_HOST")
@@ -88,6 +97,7 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
         "http://localhost:3002",
+        "http://localhost:8080",
         "https://*.vercel.app",
         "https://test-ctowuw7l8-trents-projects-d2eec580.vercel.app",
         "https://test-app-alpha-opal.vercel.app"
@@ -677,212 +687,7 @@ async def analyze_ttm_squeeze(request: HistoricalBatchRequest):
             detail=f"Error in TTM Squeeze analysis: {str(e)} (Type: {type(e).__name__})"
         )
 
-@app.get("/api/stocks/market-scanner/{exchange}", response_model=List[Dict])
-async def market_scanner(
-    exchange: str = "US", 
-    min_turnover_us: float = 2000000,  # 2M for US stocks
-    min_turnover_au: float = 500000,   # 500K for AU stocks (lower due to smaller market)
-    min_squeeze_days: int = 5,
-    min_volume_spike_ratio_us: float = 10.0,  # 10x for US stocks
-    min_volume_spike_ratio_au: float = 5.0    # 5x for AU stocks (lower due to smaller market)
-):
-    """Market scanner that processes TTM Squeeze and Volume Spike filters simultaneously"""
-    logger.info("="*80)
-    logger.info(f"MARKET SCANNER FOR {exchange}")
-    
-    # Set turnover threshold based on exchange
-    if exchange.upper() == "US":
-        min_turnover = min_turnover_us
-        min_volume_spike_ratio = min_volume_spike_ratio_us
-        logger.info(f"Min turnover (US): ${min_turnover:,.0f}")
-        logger.info(f"Min volume spike ratio (US): {min_volume_spike_ratio}x")
-    elif exchange.upper() == "AU":
-        min_turnover = min_turnover_au
-        min_volume_spike_ratio = min_volume_spike_ratio_au
-        logger.info(f"Min turnover (AU): ${min_turnover:,.0f}")
-        logger.info(f"Min volume spike ratio (AU): {min_volume_spike_ratio}x")
-    else:
-        min_turnover = min_turnover_us  # Default to US threshold
-        min_volume_spike_ratio = min_volume_spike_ratio_us  # Default to US threshold
-        logger.info(f"Min turnover (default): ${min_turnover:,.0f}")
-        logger.info(f"Min volume spike ratio (default): {min_volume_spike_ratio}x")
-    
-    logger.info(f"Min squeeze days: {min_squeeze_days}")
-    logger.info("="*80)
-    
-    try:
-        # Step 1: Get all stocks from the exchange (already filtered for major exchanges)
-        logger.info("Step 1: Getting all stocks from exchange...")
-        if exchange.upper() == "US":
-            logger.info("Fetching US stocks...")
-            all_stocks_response = await get_us_stocks()
-        elif exchange.upper() == "AU":
-            logger.info("Fetching ASX stocks...")
-            all_stocks_response = await get_asx_stocks()
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported exchange: {exchange}")
-        
-        if not all_stocks_response:
-            logger.warning("No stocks found for exchange")
-            return []
-        
-        logger.info(f"Found {len(all_stocks_response)} stocks on {exchange}")
-        
-        stock_codes = [stock.code for stock in all_stocks_response]
-        
-        # Step 2: Fetch full historical data for ALL stocks in one go (most efficient)
-        logger.info("Step 2: Fetching full historical data for all stocks...")
-        print(f"🔄 Fetching data for {len(stock_codes)} stocks...")
-        
-        end_date = datetime.now(pytz.UTC)
-        start_date = end_date - timedelta(days=730)
-        
-        # Use maximum concurrency for speed
-        all_stock_data = await process_stock_batch_concurrent(
-            stock_codes,
-            exchange,
-            start_date.strftime('%Y-%m-%d'),
-            end_date.strftime('%Y-%m-%d'),
-            max_concurrent=400  # Higher concurrency for speed
-        )
-        
-        # Process multiple filters simultaneously using the fetched data
-        ttm_squeeze_candidates = []
-        volume_spike_candidates = []
-        
-        for data in all_stock_data:
-            if data['success'] and data['data'] and len(data['data']) > 20:  # Need enough data
-                stock_data = data['data']
-                latest_data = stock_data[-1]
-                close_price = float(latest_data['close'])
-                volume = int(latest_data['volume'])
-                volume_usd = close_price * volume
-                
-                # Check turnover filter first - applies to both TTM squeeze and volume spikes
-                if volume_usd >= min_turnover:
-                    # Add to TTM squeeze candidates
-                    ttm_squeeze_candidates.append(data)
-                    
-                    # Check for volume spikes (last 3 days vs 30-day median)
-                    if len(stock_data) >= 30:
-                        recent_volumes = [int(d['volume']) for d in stock_data[-3:]]  # Last 3 days
-                        trailing_volumes = [int(d['volume']) for d in stock_data[-30:]]  # Last 30 days
-                        
-                        # Calculate median of trailing 30 days
-                        median_volume_30d = statistics.median(trailing_volumes)
-                        
-                        # Skip stocks with zero volume or zero median volume
-                        if median_volume_30d <= 0 or all(vol == 0 for vol in recent_volumes):
-                            continue
-                        
-                        # Calculate 9 EMA
-                        closes = [float(d['close']) for d in stock_data]
-                        ema_9 = calculate_ema(closes, 9)
-                        current_price = closes[-1]
-                        
-                        # Check if ALL of the last 3 days had a volume spike AND price is above 9 EMA
-                        has_volume_spike = all(vol >= median_volume_30d * min_volume_spike_ratio for vol in recent_volumes)
-                        above_ema = current_price > ema_9
-                        
-                        if has_volume_spike and above_ema:
-                            volume_spike_candidates.append({
-                                'symbol': data['symbol'],
-                                'data': stock_data,
-                                'latest_volume_usd': volume_usd,
-                                'volume_spike_ratio': max(recent_volumes) / median_volume_30d if median_volume_30d > 0 else 0,
-                                'current_price': current_price,
-                                'ema_9': ema_9
-                            })
-        
-        logger.info(f"After simultaneous filtering:")
-        logger.info(f"  - TTM Squeeze candidates: {len(ttm_squeeze_candidates)} stocks")
-        logger.info(f"  - Volume spike candidates: {len(volume_spike_candidates)} stocks")
-        print(f"✅ Filters: {len(ttm_squeeze_candidates)} TTM, {len(volume_spike_candidates)} Volume spikes")
-        
-        if not ttm_squeeze_candidates:
-            logger.warning("No stocks passed TTM squeeze filters")
-            return []
-        
-        # Step 3: Apply TTM Squeeze analysis (CPU-bound, separated from IO)
-        logger.info(f"Step 3: Applying TTM Squeeze analysis (min {min_squeeze_days} days)...")
-        squeeze_results = await analyze_ttm_squeeze_concurrent(ttm_squeeze_candidates, min_squeeze_days)
-        
-        # Add additional info to results
-        final_results = []
-        for result in squeeze_results:
-            # Find the corresponding stock data for turnover
-            stock_data = next((s for s in ttm_squeeze_candidates if s['symbol'] == result['symbol']), None)
-            if stock_data and stock_data['data']:
-                latest_data = stock_data['data'][-1]
-                turnover = float(latest_data['close']) * int(latest_data['volume'])
-                result["exchange"] = exchange
-                result["turnover"] = turnover
-                result["name"] = ""
-                
-                # Filter out stocks with ATR/close ratio < 1%
-                atr_ratio = result.get('atr_ratio', None)
-                if atr_ratio is not None and atr_ratio < 1.0:
-                    logger.info(f"[FILTERED] {result['symbol']}: ATR ratio {atr_ratio:.2f}% < 1% threshold")
-                    continue
-                
-                final_results.append(result)
-                
-                # Enhanced logging with ATR ratio
-                atr_info = f"ATR: {atr_ratio:.2f}%" if atr_ratio is not None else "ATR: N/A"
-                logger.info(f"[PASS] {result['symbol']}: Squeeze days={result['squeeze_days']}, intensity={result['squeeze_intensity']}, turnover=${result['turnover']:,.0f}, {atr_info}")
-                
-                # Print ATR ratio for quick assessment
-                if atr_ratio is not None:
-                    if atr_ratio < 2.0:
-                        print(f"🔴 {result['symbol']}: Low volatility squeeze (ATR: {atr_ratio:.2f}%)")
-                    elif atr_ratio < 5.0:
-                        print(f"🟡 {result['symbol']}: Medium volatility squeeze (ATR: {atr_ratio:.2f}%)")
-                    else:
-                        print(f"🟢 {result['symbol']}: High volatility squeeze (ATR: {atr_ratio:.2f}%)")
-        
-        logger.info(f"TTM Squeeze analysis complete. Found {len(final_results)} stocks meeting criteria")
-        print(f"🎯 TTM Squeeze: {len(final_results)} stocks found")
-        
-        # Log volume spike results for reference
-        if volume_spike_candidates:
-            print(f"📈 Volume Spikes: {len(volume_spike_candidates)} stocks found")
-            
-            # Sort by max spike ratio and show detailed results
-            sorted_spikes = sorted(volume_spike_candidates, key=lambda x: x['volume_spike_ratio'], reverse=True)
-            
-            for spike in sorted_spikes:
-                symbol = spike['symbol']
-                current_price = spike['current_price']
-                ema_9 = spike['ema_9']
-                
-                # Calculate spike ratios for display
-                stock_data = spike['data']
-                recent_volumes = [int(d['volume']) for d in stock_data[-3:]]
-                trailing_volumes = [int(d['volume']) for d in stock_data[-30:]]
-                median_volume_30d = statistics.median(trailing_volumes)
-                
-                # Prevent division by zero
-                if median_volume_30d > 0:
-                    spike_ratios = [round(vol / median_volume_30d, 1) for vol in recent_volumes]
-                    ratios_str = f"{spike_ratios[0]}x, {spike_ratios[1]}x, {spike_ratios[2]}x"
-                else:
-                    ratios_str = "N/A (zero volume)"
-                
-                print(f"  {symbol}: ${current_price:.2f} | {ratios_str} | Max: {spike['volume_spike_ratio']:.1f}x | EMA9: ${ema_9:.2f}")
-        else:
-            print("📈 Volume Spikes: 0 stocks found")
-        
-        logger.info("="*80)
-        return final_results
-        
-    except Exception as e:
-        logger.error(f"Error in TTM Squeeze analysis: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Error details: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error in TTM Squeeze analysis: {str(e)} (Type: {type(e).__name__})"
-        )
+
 
 @app.get("/api/test-yfinance")
 async def test_yfinance():
@@ -1399,6 +1204,11 @@ async def process_stock_batch_concurrent(stock_codes: List[str], exchange: str, 
     """Process a batch of stocks concurrently with high concurrency for speed"""
     logger.info(f"Processing {len(stock_codes)} stocks concurrently (max {max_concurrent} at once)")
     
+    # Check if scan was cancelled
+    if exchange not in running_scans:
+        logger.info(f"Scan for {exchange} was cancelled")
+        return []
+    
     # Create semaphore to limit concurrent requests
     semaphore = asyncio.Semaphore(max_concurrent)
     
@@ -1903,6 +1713,11 @@ async def market_scanner_fast(
         end_date = datetime.now(pytz.UTC)
         start_date = end_date - timedelta(days=730)
         
+        # Check if scan was cancelled before starting data fetch
+        if exchange not in running_scans:
+            logger.info(f"Scan for {exchange} was cancelled before data fetch")
+            return {"ttm_squeeze": [], "volume_spikes": []}
+        
         # Use maximum concurrency for speed
         all_stock_data = await process_stock_batch_concurrent(
             stock_codes,
@@ -1911,6 +1726,11 @@ async def market_scanner_fast(
             end_date.strftime('%Y-%m-%d'),
             max_concurrent=400  # Higher concurrency for speed
         )
+        
+        # Check if scan was cancelled after data fetch
+        if exchange not in running_scans:
+            logger.info(f"Scan for {exchange} was cancelled after data fetch")
+            return {"ttm_squeeze": [], "volume_spikes": []}
         
         # Step 3: Process all filters simultaneously in memory (no additional API calls)
         logger.info("Step 3: Processing filters simultaneously...")
@@ -1968,7 +1788,12 @@ async def market_scanner_fast(
         
         if not ttm_squeeze_candidates:
             logger.warning("No stocks passed TTM squeeze filters")
-            return []
+            return {"ttm_squeeze": [], "volume_spikes": []}
+        
+        # Check if scan was cancelled before TTM analysis
+        if exchange not in running_scans:
+            logger.info(f"Scan for {exchange} was cancelled before TTM analysis")
+            return {"ttm_squeeze": [], "volume_spikes": []}
         
         # Step 4: Apply TTM Squeeze analysis with maximum CPU utilization
         logger.info(f"Step 4: Applying TTM Squeeze analysis (min {min_squeeze_days} days)...")
@@ -2040,7 +1865,12 @@ async def market_scanner_fast(
             print("📈 Volume Spikes: 0 stocks found")
         
         logger.info("="*80)
-        return final_results
+        
+        # Return both TTM squeeze and volume spike results
+        return {
+            "ttm_squeeze": final_results,
+            "volume_spikes": volume_spike_candidates
+        }
         
     except Exception as e:
         logger.error(f"Error in fast market scanner: {str(e)}")
@@ -2050,6 +1880,204 @@ async def market_scanner_fast(
             status_code=500,
             detail=f"Error in fast market scanner: {str(e)} (Type: {type(e).__name__})"
         )
+
+@app.get("/api/market-scanner/results/{country}")
+async def get_market_scanner_results(country: str):
+    """Get the latest market scanner results for a specific country from database"""
+    try:
+        if country.upper() not in ["US", "AU"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported country: {country}. Must be US or AU."
+            )
+        
+        results = DatabaseService.get_latest_results(country.upper())
+        
+        # Add Sydney time for frontend compatibility
+        if results["last_updated"]:
+            utc_time = datetime.fromisoformat(results["last_updated"].replace('Z', '+00:00'))
+            sydney_time = utc_time.astimezone(pytz.timezone('Australia/Sydney'))
+            results["sydney_time"] = sydney_time.isoformat()
+        else:
+            results["sydney_time"] = None
+        
+        return results
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 400) as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error getting results for {country}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving results: {str(e)}"
+        )
+
+@app.get("/api/market-scanner/results")
+async def get_all_market_scanner_results():
+    """Get the latest market scanner results for both countries from database"""
+    try:
+        us_results = DatabaseService.get_latest_results("US")
+        au_results = DatabaseService.get_latest_results("AU")
+        
+        return {
+            "US": us_results,
+            "AU": au_results,
+            "timestamp": datetime.now(pytz.UTC).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting all results: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving results: {str(e)}"
+        )
+
+@app.post("/api/market-scanner/cancel/{country}")
+async def cancel_market_scanner(country: str):
+    """Cancel a running market scanner for a specific country"""
+    try:
+        country = country.upper()
+        if country in running_scans:
+            running_scans.remove(country)
+            logger.info(f"Cancelled market scanner for {country}")
+            return {"message": f"Market scanner for {country} has been cancelled"}
+        else:
+            return {"message": f"No running scan found for {country}"}
+    except Exception as e:
+        logger.error(f"Error cancelling scanner for {country}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error cancelling scanner: {str(e)}"
+        )
+
+@app.get("/api/market-scanner/run/{country}")
+async def run_market_scanner_manual(
+    country: str,
+    min_turnover_us: float = 2000000,  # 2M for US stocks
+    min_turnover_au: float = 500000,   # 500K for AU stocks  
+    min_squeeze_days: int = 5,
+    min_volume_spike_ratio_us: float = 10.0,  # 10x for US stocks
+    min_volume_spike_ratio_au: float = 5.0    # 5x for AU stocks
+):
+    """Manually trigger a market scanner run and save results to database"""
+    try:
+        if country.upper() not in ["US", "AU"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported country: {country}. Must be US or AU."
+            )
+        
+        country_upper = country.upper()
+        
+        # Check if scan is already running for this country
+        if country_upper in running_scans:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Market scanner for {country_upper} is already running"
+            )
+        
+        # Add to running scans
+        running_scans.add(country_upper)
+        logger.info(f"Starting manual market scanner for {country_upper}")
+        
+        # Run the fast market scanner with parameters
+        scanner_results = await market_scanner_fast(
+            exchange=country_upper,
+            min_turnover_us=min_turnover_us,
+            min_turnover_au=min_turnover_au,
+            min_squeeze_days=min_squeeze_days,
+            min_volume_spike_ratio_us=min_volume_spike_ratio_us,
+            min_volume_spike_ratio_au=min_volume_spike_ratio_au
+        )
+        
+        # Convert results to the format expected by DatabaseService
+        formatted_results = {
+            "ttm_squeeze": [],
+            "volume_spikes": []
+        }
+        
+        # Process TTM squeeze results
+        for result in scanner_results["ttm_squeeze"]:
+            formatted_results["ttm_squeeze"].append({
+                "symbol": result["symbol"],
+                "company_name": result.get("name", result["symbol"]),
+                "exchange": result["exchange"],
+                "price": result.get("latest_close", 0),
+                "change": 0,
+                "change_percent": 0,
+                "volume": result.get("latest_volume", 0),
+                "market_cap": 0,
+                "pe_ratio": 0,
+                "squeeze_days": result.get("squeeze_days", 0),
+                "bollinger_bands": result.get("bollinger_bands", {}),
+                "keltner_channels": result.get("keltner_channels", {}),
+                "momentum": result.get("momentum", 0),
+                "squeeze_intensity": result.get("squeeze_intensity", "")
+            })
+        
+        # Process volume spike results
+        for spike in scanner_results["volume_spikes"]:
+            # Calculate volume ratio and other required fields
+            stock_data = spike['data']
+            recent_volumes = [int(d['volume']) for d in stock_data[-3:]]
+            trailing_volumes = [int(d['volume']) for d in stock_data[-30:]]
+            median_volume_30d = statistics.median(trailing_volumes)
+            max_spike_ratio = max(vol / median_volume_30d for vol in recent_volumes) if median_volume_30d > 0 else 0
+            
+            # Determine spike intensity based on max ratio
+            if max_spike_ratio >= 20:
+                intensity = "extreme"
+            elif max_spike_ratio >= 10:
+                intensity = "high"
+            else:
+                intensity = "moderate"
+            
+            formatted_results["volume_spikes"].append({
+                "symbol": spike["symbol"],
+                "company_name": spike["symbol"],  # We don't have company names in spike data
+                "exchange": country.upper(),
+                "price": spike["current_price"],
+                "change": 0,
+                "change_percent": 0,
+                "volume": int(stock_data[-1]['volume']),  # Latest volume
+                "market_cap": 0,
+                "pe_ratio": 0,
+                "spike_days": 3,  # Always 3 consecutive days
+                "volume_ratio": max_spike_ratio,
+                "avg_volume_30d": int(median_volume_30d),
+                "consecutive_days": 3,
+                "spike_intensity": intensity
+            })
+        
+        # Save results to database
+        DatabaseService.save_scan_results(country_upper, formatted_results, "manual")
+        
+        # Remove from running scans
+        running_scans.discard(country_upper)
+        
+        logger.info(f"Manual market scanner completed for {country_upper}")
+        return {
+            "message": f"Market scanner completed for {country_upper}", 
+            "ttm_squeeze_count": len(formatted_results["ttm_squeeze"]),
+            "volume_spike_count": len(formatted_results["volume_spikes"]),
+            "total_results": len(formatted_results["ttm_squeeze"]) + len(formatted_results["volume_spikes"])
+        }
+        
+    except Exception as e:
+        # Remove from running scans on error
+        running_scans.discard(country_upper)
+        logger.error(f"Error running manual scanner for {country}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error running scanner: {str(e)}"
+        )
+
+# Background task to start scheduler
+@app.on_event("startup")
+async def start_scheduler_background():
+    """Start the scheduler as a background task when the app starts"""
+    logger.info("🚀 Starting Market Scanner Scheduler in background...")
+    asyncio.create_task(scheduler.schedule_scanners())
 
 if __name__ == "__main__":
     import uvicorn
