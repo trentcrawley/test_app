@@ -100,7 +100,10 @@ app.add_middleware(
         "http://localhost:8080",
         "https://*.vercel.app",
         "https://test-ctowuw7l8-trents-projects-d2eec580.vercel.app",
-        "https://test-app-alpha-opal.vercel.app"
+        "https://test-app-alpha-opal.vercel.app",
+        "https://test-app-j26v.vercel.app",
+        "https://test-app-j26v-git-main-trents-projects-d2eec580.vercel.app",
+        "https://test-app-j26v-6gjk93oiu-trents-projects-d2eec580.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
